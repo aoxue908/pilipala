@@ -73,6 +73,7 @@ class ApiInterceptor extends Interceptor {
       case DioExceptionType.sendTimeout:
         return '发送请求超时，请检查网络设置';
       case DioExceptionType.unknown:
+      default:
         final String res = await checkConnect();
         return '$res，网络异常！';
     }

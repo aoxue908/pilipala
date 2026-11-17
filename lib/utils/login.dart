@@ -20,20 +20,23 @@ class LoginUtils {
   static Future refreshLoginStatus(bool status) async {
     try {
       // 更改我的页面登录状态
-      await Get.find<MineController>().resetUserInfo();
+      if (Get.isRegistered<MineController>()) {
+        await Get.find<MineController>().resetUserInfo();
+        Get.find<MineController>().userLogin.value = status;
+      }
 
       // 更改主页登录状态
-      HomeController homeCtr = Get.find<HomeController>();
-      homeCtr.updateLoginStatus(status);
+      if (Get.isRegistered<HomeController>()) {
+        Get.find<HomeController>().updateLoginStatus(status);
+      }
 
-      MineController mineCtr = Get.find<MineController>();
-      mineCtr.userLogin.value = status;
+      if (Get.isRegistered<DynamicsController>()) {
+        Get.find<DynamicsController>().userLogin.value = status;
+      }
 
-      DynamicsController dynamicsCtr = Get.find<DynamicsController>();
-      dynamicsCtr.userLogin.value = status;
-
-      MediaController mediaCtr = Get.find<MediaController>();
-      mediaCtr.userLogin.value = status;
+      if (Get.isRegistered<MediaController>()) {
+        Get.find<MediaController>().userLogin.value = status;
+      }
     } catch (err) {
       SmartDialog.showToast('refreshLoginStatus error: ${err.toString()}');
     }
@@ -81,11 +84,15 @@ class LoginUtils {
           }
           await userInfoCache.put('userInfoCache', result['data']);
 
-          final HomeController homeCtr = Get.find<HomeController>();
-          homeCtr.updateLoginStatus(true);
-          homeCtr.userFace.value = result['data'].face;
-          final MediaController mediaCtr = Get.find<MediaController>();
-          mediaCtr.mid = result['data'].mid;
+          if (Get.isRegistered<HomeController>()) {
+            final HomeController homeCtr = Get.find<HomeController>();
+            homeCtr.updateLoginStatus(true);
+            homeCtr.userFace.value = result['data'].face;
+          }
+          if (Get.isRegistered<MediaController>()) {
+            final MediaController mediaCtr = Get.find<MediaController>();
+            mediaCtr.mid = result['data'].mid;
+          }
           await LoginUtils.refreshLoginStatus(true);
         } catch (err) {
           SmartDialog.show(builder: (BuildContext context) {

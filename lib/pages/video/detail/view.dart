@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart';
 import 'package:floating/floating.dart';
@@ -81,11 +82,22 @@ class _VideoDetailPageState extends State<VideoDetailPage>
         tag: heroTag);
     videoIntroController.videoDetail.listen((value) {
       videoPlayerServiceHandler.onVideoDetailChange(value, vdCtr.cid.value);
+      if (value.ugcSeason != null ||
+          (value.pages != null && value.pages!.length > 1)) {
+        if (!vdCtr.bottomList.contains(BottomControlType.episode)) {
+          vdCtr.bottomList.insert(3, BottomControlType.episode);
+        }
+      }
     });
     if (vdCtr.videoType == SearchType.media_bangumi) {
       bangumiIntroController = Get.put(BangumiIntroController(), tag: heroTag);
       bangumiIntroController.bangumiDetail.listen((value) {
         videoPlayerServiceHandler.onVideoDetailChange(value, vdCtr.cid.value);
+        if (value.episodes != null && value.episodes!.length > 1) {
+          if (!vdCtr.bottomList.contains(BottomControlType.episode)) {
+            vdCtr.bottomList.insert(3, BottomControlType.episode);
+          }
+        }
       });
       vdCtr.cid.listen((p0) {
         videoPlayerServiceHandler.onVideoDetailChange(
@@ -199,19 +211,30 @@ class _VideoDetailPageState extends State<VideoDetailPage>
           if (videoIntroController.videoDetail.value.ugcSeason != null ||
               (videoIntroController.videoDetail.value.pages != null &&
                   videoIntroController.videoDetail.value.pages!.length > 1)) {
-            vdCtr.bottomList.insert(3, BottomControlType.episode);
+            if (!vdCtr.bottomList.contains(BottomControlType.episode)) {
+              vdCtr.bottomList.insert(3, BottomControlType.episode);
+            }
           }
         }
         if (vdCtr.videoType == SearchType.media_bangumi) {
           bangumiIntroController.hiddenEpisodeBottomSheet();
           if (bangumiIntroController.bangumiDetail.value.episodes != null &&
               bangumiIntroController.bangumiDetail.value.episodes!.length > 1) {
-            vdCtr.bottomList.insert(3, BottomControlType.episode);
+            if (!vdCtr.bottomList.contains(BottomControlType.episode)) {
+              vdCtr.bottomList.insert(3, BottomControlType.episode);
+            }
           }
         }
       } else {
-        if (vdCtr.bottomList.contains(BottomControlType.episode)) {
-          vdCtr.bottomList.removeAt(3);
+        final hasUgc = vdCtr.videoType == SearchType.video &&
+            (videoIntroController.videoDetail.value.ugcSeason != null ||
+                (videoIntroController.videoDetail.value.pages != null &&
+                    videoIntroController.videoDetail.value.pages!.length > 1));
+        final hasBangumi = vdCtr.videoType == SearchType.media_bangumi &&
+            bangumiIntroController.bangumiDetail.value.episodes != null &&
+            bangumiIntroController.bangumiDetail.value.episodes!.length > 1;
+        if (!hasUgc && !hasBangumi && vdCtr.bottomList.contains(BottomControlType.episode)) {
+          vdCtr.bottomList.remove(BottomControlType.episode);
         }
       }
       vdCtr.toggeleWatchLaterVisible(!isFullScreen);
@@ -261,7 +284,6 @@ class _VideoDetailPageState extends State<VideoDetailPage>
       videoIntroController.isPaused = true;
       plPlayerController!.removeStatusLister(playerListener);
       plPlayerController!.pause();
-      vdCtr.clearSubtitleContent();
     }
     isShowing.value = false;
     super.didPushNext();
@@ -277,7 +299,6 @@ class _VideoDetailPageState extends State<VideoDetailPage>
 
     if (plPlayerController != null &&
         plPlayerController!.videoPlayerController != null) {
-      vdCtr.setSubtitleContent();
       isShowing.value = true;
     }
     vdCtr.isFirstTime = false;
@@ -491,7 +512,11 @@ class _VideoDetailPageState extends State<VideoDetailPage>
   Widget build(BuildContext context) {
     final sizeContext = MediaQuery.sizeOf(context);
     final _context = MediaQuery.of(context);
-    late double defaultVideoHeight = sizeContext.width * 9 / 16;
+    final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
+    // 桌面端默认高度限制在视口 52% 左右，留出下方空间给合集选集和评论；移动端按 16:9
+    late double defaultVideoHeight = isDesktop
+        ? math.min(sizeContext.height * 0.52, sizeContext.width * 9 / 16)
+        : sizeContext.width * 9 / 16;
     late RxDouble videoHeight = defaultVideoHeight.obs;
     final double pinnedHeaderHeight =
         statusBarHeight + kToolbarHeight + videoHeight.value;
@@ -499,8 +524,9 @@ class _VideoDetailPageState extends State<VideoDetailPage>
 
     // 竖屏
     final bool isPortrait = _context.orientation == Orientation.portrait;
-    // 横屏
-    final bool isLandscape = _context.orientation == Orientation.landscape;
+    // 横屏：移动端横屏自动进入全屏；桌面端横屏是正常窗口比例，不能误判为全屏
+    final bool isLandscape =
+        !isDesktop && _context.orientation == Orientation.landscape;
     final Rx<bool> isFullScreen = plPlayerController?.isFullScreen ?? false.obs;
     // 全屏时高度撑满
     if (isLandscape || isFullScreen.value == true) {
@@ -621,19 +647,21 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                 return <Widget>[
                   Obx(
                     () {
+                      final bool isDesktop =
+                          !Platform.isAndroid && !Platform.isIOS;
                       final Orientation orientation =
                           MediaQuery.of(context).orientation;
                       final bool isFullScreen =
                           plPlayerController?.isFullScreen.value == true;
-                      final double expandedHeight =
-                          orientation == Orientation.landscape || isFullScreen
-                              ? (MediaQuery.sizeOf(context).height -
-                                  (orientation == Orientation.landscape
-                                      ? 0
-                                      : MediaQuery.of(context).padding.top))
-                              : videoHeight.value;
-                      if (orientation == Orientation.landscape ||
-                          isFullScreen) {
+                      final bool isLandscape =
+                          !isDesktop && orientation == Orientation.landscape;
+                      final double expandedHeight = isLandscape || isFullScreen
+                          ? (MediaQuery.sizeOf(context).height -
+                              (isLandscape
+                                  ? 0
+                                  : MediaQuery.of(context).padding.top))
+                          : videoHeight.value;
+                      if (isLandscape || isFullScreen) {
                         enterFullScreen();
                       } else {
                         exitFullScreen();
@@ -656,8 +684,9 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                                 plPlayerController!
                                     .triggerFullScreen(status: false);
                               }
-                              if (MediaQuery.of(context).orientation ==
-                                  Orientation.landscape) {
+                              if (!isDesktop &&
+                                  MediaQuery.of(context).orientation ==
+                                      Orientation.landscape) {
                                 verticalScreen();
                               }
                             },
@@ -702,8 +731,11 @@ class _VideoDetailPageState extends State<VideoDetailPage>
 
               /// 不收回
               pinnedHeaderSliverHeightBuilder: () {
-                return MediaQuery.of(context).orientation ==
-                            Orientation.landscape ||
+                final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
+                final bool isLandscape = !isDesktop &&
+                    MediaQuery.of(context).orientation ==
+                        Orientation.landscape;
+                return isLandscape ||
                         plPlayerController?.isFullScreen.value == true
                     ? MediaQuery.sizeOf(context).height
                     : playerStatus.value != PlayerStatus.playing

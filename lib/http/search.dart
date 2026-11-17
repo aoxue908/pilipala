@@ -83,13 +83,17 @@ class SearchHttp {
       // 'order_sort': 0,
       // 'user_type': 0,
       'page': page,
+      'web_location': 333.999,
       if (order != null) 'order': order,
       if (duration != null) 'duration': duration,
       if (tids != null && tids != -1) 'tids': tids,
     };
-    var res = await Request().get(Api.searchByType, data: reqData);
-    if (res.data['code'] == 0) {
-      if (res.data['data']['numPages'] == 0) {
+    Map params = await WbiSign().makSign(reqData);
+    var res = await Request().get(Api.searchByType, data: params);
+    if (res.data != null && res.data['code'] == 0) {
+      if (res.data['data'] == null ||
+          res.data['data']['numPages'] == 0 ||
+          res.data['data']['result'] == null) {
         // 我想返回数据，使得可以通过data.list 取值，结果为[]
         return {'status': true, 'data': Data()};
       }
@@ -97,8 +101,10 @@ class SearchHttp {
       try {
         switch (searchType) {
           case SearchType.video:
-            List<int> blackMidsList =
+            List<dynamic> rawBlackList =
                 setting.get(SettingBoxKey.blackMidsList, defaultValue: [-1]);
+            List<int> blackMidsList =
+                rawBlackList.map((e) => e as int).toList();
             for (var i in res.data['data']['result']) {
               // 屏蔽推广和拉黑用户
               i['available'] = !blackMidsList.contains(i['mid']);
@@ -123,13 +129,18 @@ class SearchHttp {
           'data': data,
         };
       } catch (err) {
-        print(err);
+        print('searchByType parse error: $err');
+        return {
+          'status': false,
+          'data': [],
+          'msg': '数据解析异常: $err',
+        };
       }
     } else {
       return {
         'status': false,
         'data': [],
-        'msg': res.data['message'],
+        'msg': res.data != null ? res.data['message'] : '请求错误 🙅',
       };
     }
   }

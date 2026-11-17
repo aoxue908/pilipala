@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:developer';
+import 'package:dio/dio.dart';
 import 'package:hive/hive.dart';
 import '../common/constants.dart';
 import '../models/common/reply_type.dart';
@@ -10,9 +12,9 @@ import '../models/video/ai.dart';
 import '../models/video/play/url.dart';
 import '../models/video/subTitile/result.dart';
 import '../models/video_detail_res.dart';
+import '../utils/id_utils.dart';
 import '../utils/recommend_filter.dart';
 import '../utils/storage.dart';
-import '../utils/subtitle.dart';
 import '../utils/wbi_sign.dart';
 import 'api.dart';
 import 'init.dart';
@@ -491,22 +493,153 @@ class VideoHttp {
     }
   }
 
-  static Future getSubtitle({int? cid, String? bvid}) async {
-    var res = await Request().get(Api.getSubtitleConfig, data: {
-      'cid': cid,
-      'bvid': bvid,
-    });
-    try {
-      if (res.data['code'] == 0) {
-        return {
-          'status': true,
-          'data': SubTitlteModel.fromJson(res.data['data']),
-        };
-      } else {
-        return {'status': false, 'data': [], 'msg': res.data['msg']};
+  static final _subtitleCdn = Dio(BaseOptions(
+    connectTimeout: const Duration(seconds: 4),
+    receiveTimeout: const Duration(seconds: 4),
+    headers: {
+      'Referer': 'https://www.bilibili.com/',
+      'User-Agent':
+          'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Mobile Safari/537.36',
+    },
+  ));
+
+  static bool lastSubtitleNeedLogin = false;
+
+  static Future<List<SubTitlteItemModel>> getSubtitleTracks({
+    required int cid,
+    required String bvid,
+    int? aid,
+  }) async {
+    lastSubtitleNeedLogin = false;
+    aid ??= IdUtils.bv2av(bvid);
+    final params = <String, dynamic>{'cid': cid, 'bvid': bvid, 'aid': aid};
+    Future<List<SubTitlteItemModel>?> fetch(
+      String path,
+      Map<String, dynamic> query, {
+      bool checkCid = false,
+    }) async {
+      try {
+        final res = await Request()
+            .get(path, data: query)
+            .timeout(const Duration(seconds: 4));
+        final data = res.data;
+        log('[subtitle] fetch $path → code=${data is Map ? data["code"] : "?"} '
+            'dataType=${data is Map ? data["data"].runtimeType : data.runtimeType}',
+            name: 'subtitle');
+        if (data is Map && data['code'] == 0) {
+          final inner = data['data'];
+          if (inner is! Map) {
+            log('[subtitle] unexpected data type: ${inner.runtimeType}',
+                name: 'subtitle');
+            return null;
+          }
+          if (inner['need_login_subtitle'] == true) {
+            lastSubtitleNeedLogin = true;
+            log('[subtitle] $path reports need_login_subtitle=true',
+                name: 'subtitle');
+          }
+          // 若为视频详情兜底接口，必须严格校验返回的 cid 是否与目标视频集数一致，严禁将分P第一集或其他集的字幕错挂给当前集！
+          if (checkCid) {
+            final innerCid = inner['cid'] is int
+                ? inner['cid']
+                : int.tryParse(inner['cid']?.toString() ?? '');
+            if (innerCid != null && innerCid != cid) {
+              log('[subtitle] rejecting videoIntro tracks: response cid=$innerCid != target cid=$cid',
+                  name: 'subtitle');
+              return null;
+            }
+          }
+          final subtitles = SubTitlteModel.fromJson(Map<String, dynamic>.from(inner)).subtitles;
+          log('[subtitle] parsed ${subtitles?.length ?? 0} track(s) from $path',
+              name: 'subtitle');
+          return subtitles;
+        } else if (data is Map) {
+          log('[subtitle] non-zero code from $path: code=${data["code"]} '
+              'msg=${data["message"]}',
+              name: 'subtitle');
+        }
+      } catch (e, st) {
+        log('[subtitle] fetch $path error: $e', name: 'subtitle', error: e, stackTrace: st);
       }
-    } catch (err) {
-      return {'status': false, 'data': [], 'msg': res.data['msg']};
+      return null;
+    }
+
+    // 1. 优先尝试 /x/player/wbi/v2（B站最新的播放器接口，需 WBI 签名，包含完整的多语言 AI 字幕与人工字幕）
+    try {
+      final wbiParams = <String, dynamic>{'aid': aid, 'cid': cid};
+      final signed = await WbiSign()
+          .makSign(Map.of(wbiParams))
+          .timeout(const Duration(seconds: 4));
+      log('[subtitle] trying WBI endpoint with params=${signed.keys.toList()}',
+          name: 'subtitle');
+      final wbiTracks = await fetch(Api.getSubtitleWbi, signed);
+      if (wbiTracks != null && wbiTracks.isNotEmpty) return wbiTracks;
+    } catch (e, st) {
+      log('[subtitle] WBI signing failed: $e', name: 'subtitle', error: e, stackTrace: st);
+    }
+
+    // 2. 次选尝试 /x/player/v2（无需签名的旧版播放器接口）
+    final v2Tracks = await fetch(Api.getSubtitleConfig, params);
+    if (v2Tracks != null && v2Tracks.isNotEmpty) return v2Tracks;
+
+    // 3. 备用兜底：严格核对 cid 校验后才可使用，绝不能把分P其他集的字幕错误挪用
+    log('[subtitle] falling back to video view endpoint', name: 'subtitle');
+    final viewTracks = await fetch(Api.videoIntro, {'bvid': bvid}, checkCid: true);
+    return viewTracks ?? const [];
+  }
+
+  static Future<List<dynamic>?> getSubtitleBody(SubTitlteItemModel track) async {
+    final cached = track.body;
+    if (cached != null && cached.isNotEmpty) return cached;
+    final rawUrl = track.subtitleUrl;
+    log('[subtitle] getSubtitleBody id=${track.id} lan=${track.lan} '
+        'rawUrl=$rawUrl aiType=${track.aiType}',
+        name: 'subtitle');
+    if (rawUrl == null || rawUrl.isEmpty || track.id == null) {
+      log('[subtitle] skipping: url is null/empty or id is null', name: 'subtitle');
+      return null;
+    }
+    // Fix protocol-relative URLs returned by B站 (e.g. //i0.hdslb.com/...)
+    var resolvedUrl = rawUrl.trim();
+    if (resolvedUrl.startsWith('//')) {
+      resolvedUrl = 'https:$resolvedUrl';
+    } else if (resolvedUrl.startsWith('http://')) {
+      resolvedUrl = resolvedUrl.replaceFirst('http://', 'https://');
+    }
+    final uri = Uri.tryParse(resolvedUrl);
+    if (uri == null || uri.scheme != 'https' || !uri.hasAuthority) {
+      log('[subtitle] invalid URI after resolution: $resolvedUrl', name: 'subtitle');
+      return null;
+    }
+    try {
+      log('[subtitle] fetching body from $uri', name: 'subtitle');
+      final res = await _subtitleCdn
+          .getUri<dynamic>(uri)
+          .timeout(const Duration(seconds: 6));
+      final dynamic rawData = res.data;
+      final Map dataMap;
+      if (rawData is Map) {
+        dataMap = rawData;
+      } else if (rawData is String) {
+        dataMap = jsonDecode(rawData) as Map;
+      } else {
+        log('[subtitle] unexpected response format: ${rawData.runtimeType}',
+            name: 'subtitle');
+        return null;
+      }
+      final body = dataMap['body'];
+      if (body is! List || body.isEmpty) {
+        log('[subtitle] body missing or empty; keys=${dataMap.keys.toList()}',
+            name: 'subtitle');
+        return null;
+      }
+      log('[subtitle] loaded ${body.length} cue(s) for id=${track.id}',
+          name: 'subtitle');
+      return track.body = body;
+    } catch (e, st) {
+      log('[subtitle] CDN fetch error for $uri: $e',
+          name: 'subtitle', error: e, stackTrace: st);
+      return null;
     }
   }
 
@@ -533,12 +666,4 @@ class VideoHttp {
     }
   }
 
-  // 获取字幕内容
-  static Future<Map<String, dynamic>> getSubtitleContent(url) async {
-    var res = await Request().get('https:$url');
-    final String content =
-        await SubTitleUtils.convertToWebVTT(res.data['body']);
-    final List body = res.data['body'];
-    return {'content': content, 'body': body};
-  }
 }

@@ -23,8 +23,8 @@ import 'package:pilipala/utils/storage.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:status_bar_control/status_bar_control.dart';
 import 'package:universal_platform/universal_platform.dart';
-import '../../models/video/subTitile/content.dart';
-import '../../models/video/subTitile/result.dart';
+import 'realtime_caption/caption_preferences.dart';
+import 'realtime_caption/realtime_captions.dart';
 // import 'package:wakelock_plus/wakelock_plus.dart';
 
 Box videoStorage = GStrorage.video;
@@ -77,8 +77,6 @@ class PlPlayerController {
   final Rx<bool> _doubleSpeedStatus = false.obs;
   final Rx<bool> _controlsLock = false.obs;
   final Rx<bool> _isFullScreen = false.obs;
-  final Rx<bool> _subTitleOpen = false.obs;
-  final Rx<int> _subTitleCode = (-1).obs;
   // 默认投稿视频格式
   static Rx<String> _videoType = 'archive'.obs;
 
@@ -94,6 +92,7 @@ class PlPlayerController {
   PlaylistMode _looping = PlaylistMode.none;
   bool _autoPlay = false;
   final bool _listenersInitialized = false;
+  int _captionSourceRevision = 0;
 
   // 记录历史记录
   String _bvid = '';
@@ -124,7 +123,6 @@ class PlPlayerController {
   PreferredSizeWidget? headerControl;
   PreferredSizeWidget? bottomControl;
   Widget? danmuWidget;
-  RxList subtitles = [].obs;
   String videoType = 'archive';
 
   /// 数据加载监听
@@ -156,9 +154,6 @@ class PlPlayerController {
   Stream<bool> get onMuteChanged => _mute.stream;
 
   /// 字幕开启状态
-  Rx<bool> get subTitleOpen => _subTitleOpen;
-  Rx<int> get subTitleCode => _subTitleCode;
-  // Stream<bool> get onSubTitleOpenChanged => _subTitleOpen.stream;
 
   /// [videoPlayerController] instace of Player
   Player? get videoPlayerController => _videoPlayerController;
@@ -244,9 +239,9 @@ class PlPlayerController {
   // 播放顺序相关
   PlayRepeat playRepeat = PlayRepeat.pause;
 
-  RxList<SubTitileContentModel> subtitleContents =
-      <SubTitileContentModel>[].obs;
-  RxString subtitleContent = ''.obs;
+  late final captionPreferences = CaptionPreferences(videoStorage);
+  late final realtimeCaptions =
+      RealtimeCaptions(preferences: captionPreferences);
 
   void updateSliderPositionSecond() {
     int newSecond = _sliderPosition.value.inSeconds;
@@ -340,7 +335,10 @@ class PlPlayerController {
     //  是否开启字幕
     bool enableSubTitle = false,
   }) async {
+    final captionSourceRevision = ++_captionSourceRevision;
     try {
+      realtimeCaptions.detach();
+      if (bvid.isNotEmpty) realtimeCaptions.prepareTracks(bvid, cid);
       _autoPlay = autoplay;
       _looping = looping;
       // 初始化视频倍速
@@ -353,9 +351,7 @@ class PlPlayerController {
       _cid = cid;
       _enableHeart = enableHeart;
       _isFirstTime = isFirstTime;
-      _subTitleOpen.value = enableSubTitle;
-      subtitles = [].obs;
-      subtitleContent.value = '';
+      if (enableSubTitle) realtimeCaptions.setOriginal(true);
       if (_videoPlayerController != null &&
           _videoPlayerController!.state.playing) {
         await pause(notify: false);
@@ -376,6 +372,11 @@ class PlPlayerController {
       // listen the video player events
       if (!_listenersInitialized) {
         startListeners();
+      }
+      if (captionSourceRevision == _captionSourceRevision &&
+          bvid.isNotEmpty && _videoPlayerController != null) {
+        realtimeCaptions.attach(_videoPlayerController!, dataSource,
+            start: seekTo);
       }
       await _initializePlayer(duration: _duration.value);
       bool autoEnterFullcreen =
@@ -545,6 +546,7 @@ class PlPlayerController {
           }
           videoPlayerServiceHandler.onStatusChange(
               playerStatus.status.value, isBuffering.value);
+          realtimeCaptions.updatePlayback();
 
           /// 触发回调事件
           for (var element in _statusListeners) {
@@ -555,6 +557,7 @@ class PlPlayerController {
           }
         }),
         videoPlayerController!.stream.completed.listen((event) {
+          realtimeCaptions.updatePlayback();
           if (event) {
             playerStatus.status.value = PlayerStatus.completed;
 
@@ -574,8 +577,7 @@ class PlPlayerController {
             _sliderPosition.value = event;
             updateSliderPositionSecond();
           }
-          querySubtitleContent(
-              videoPlayerController!.state.position.inSeconds.toDouble());
+          realtimeCaptions.updatePlayback(position: event);
 
           /// 触发回调事件
           for (var element in _positionListeners) {
@@ -594,8 +596,12 @@ class PlPlayerController {
         }),
         videoPlayerController!.stream.buffering.listen((event) {
           isBuffering.value = event;
+          realtimeCaptions.updatePlayback();
           videoPlayerServiceHandler.onStatusChange(
               playerStatus.status.value, event);
+        }),
+        videoPlayerController!.stream.rate.listen((_) {
+          realtimeCaptions.updatePlayback();
         }),
         // videoPlayerController!.stream.volume.listen((event) {
         //   if (!mute.value && _volumeBeforeMute != event) {
@@ -636,7 +642,7 @@ class PlPlayerController {
         if (type != 'slider') {
           await _videoPlayerController?.stream.buffer.first;
         }
-        await _videoPlayerController?.seek(position);
+        await _seekPlayer(position);
       } else {
         _timerForSeek?.cancel();
         _timerForSeek ??= _startSeekTimer(position);
@@ -650,11 +656,22 @@ class PlPlayerController {
     return Timer.periodic(const Duration(milliseconds: 200), (Timer t) async {
       if (duration.value.inSeconds != 0) {
         await _videoPlayerController!.stream.buffer.first;
-        await _videoPlayerController?.seek(position);
+        await _seekPlayer(position);
         t.cancel();
         _timerForSeek = null;
       }
     });
+  }
+
+  Future<void> _seekPlayer(Duration position) async {
+    final attachment = realtimeCaptions.beginSeek();
+    Duration? actualTarget;
+    try {
+      await _videoPlayerController?.seek(position);
+      actualTarget = position;
+    } finally {
+      realtimeCaptions.endSeek(attachment, actualTarget);
+    }
   }
 
   /// 设置倍速
@@ -1011,33 +1028,6 @@ class PlPlayerController {
     }
   }
 
-  /// 字幕
-  void toggleSubtitle(int code) {
-    _subTitleOpen.value = code != -1;
-    _subTitleCode.value = code;
-  }
-
-  void querySubtitleContent(double progress) {
-    if (subTitleCode.value == -1) {
-      subtitleContent.value = '';
-      return;
-    }
-    if (subtitles.isEmpty) {
-      return;
-    }
-    final SubTitlteItemModel? subtitle = subtitles.firstWhereOrNull(
-      (element) => element.id == subTitleCode.value,
-    );
-    if (subtitle != null && subtitle.body!.isNotEmpty) {
-      for (var content in subtitle.body!) {
-        if (progress >= content['from']! && progress <= content['to']!) {
-          subtitleContent.value = content['content']!;
-          return;
-        }
-      }
-    }
-  }
-
   setPlayRepeat(PlayRepeat type) {
     playRepeat = type;
     videoStorage.put(VideoBoxKey.playRepeat, type.value);
@@ -1054,13 +1044,16 @@ class PlPlayerController {
   }
 
   Future<void> dispose({String type = 'single'}) async {
+    _captionSourceRevision++;
     // 每次减1，最后销毁
     if (type == 'single' && playerCount.value > 1) {
+      realtimeCaptions.detach();
       _playerCount.value -= 1;
       _heartDuration = 0;
       pause();
       return;
     }
+    realtimeCaptions.dispose();
     _playerCount.value = 0;
     try {
       _timer?.cancel();

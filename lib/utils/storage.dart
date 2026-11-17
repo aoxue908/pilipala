@@ -171,6 +171,8 @@ class LocalCacheKey {
 }
 
 class VideoBoxKey {
+  static const String captionAppearance = 'captionAppearance';
+
   // 视频比例
   static const String videoFit = 'videoFit',
       // 亮度

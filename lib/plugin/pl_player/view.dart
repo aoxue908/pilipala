@@ -22,6 +22,7 @@ import 'package:screen_brightness/screen_brightness.dart';
 import '../../utils/global_data_cache.dart';
 import 'models/bottom_control_type.dart';
 import 'models/bottom_progress_behavior.dart';
+import 'realtime_caption/caption_overlay.dart';
 import 'widgets/app_bar_ani.dart';
 import 'widgets/backward_seek.dart';
 import 'widgets/bottom_control.dart';
@@ -534,45 +535,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         if (widget.danmuWidget != null)
           Positioned.fill(top: 4, child: widget.danmuWidget!),
 
-        /// 开启且有字幕时展示
-        Stack(
-          children: [
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 30,
-              child: Align(
-                alignment: Alignment.center,
-                child: Obx(
-                  () => Visibility(
-                      visible: widget.controller.subTitleCode.value != -1,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(4),
-                          color: widget.controller.subtitleContent.value != ''
-                              ? Colors.black.withOpacity(0.6)
-                              : Colors.transparent,
-                        ),
-                        padding: widget.controller.subTitleCode.value != -1
-                            ? const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 4,
-                              )
-                            : EdgeInsets.zero,
-                        child: Text(
-                          widget.controller.subtitleContent.value,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                          ),
-                        ),
-                      )),
-                ),
-              ),
-            ),
-          ],
-        ),
-
         /// 手势
         Positioned.fill(
           left: 16,
@@ -701,6 +663,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
               }
             },
             onVerticalDragEnd: (DragEndDetails details) {},
+          ),
+        ),
+
+        /// 字幕层（支持点击单词查词，其余透明区域手势向下穿透）
+        Positioned.fill(
+          child: CaptionOverlay(
+            captions: _.realtimeCaptions,
+            preferences: _.captionPreferences,
+            playerController: _,
           ),
         ),
 
@@ -896,7 +867,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                                   Duration.zero,
                                   player.state.duration,
                                 );
-                                player.seek(result);
+                                widget.controller.seekTo(result, type: 'slider');
                                 widget.controller.play();
                               },
                             ),
@@ -939,7 +910,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                                   Duration.zero,
                                   player.state.duration,
                                 );
-                                player.seek(result);
+                                widget.controller.seekTo(result, type: 'slider');
                                 widget.controller.play();
                               },
                             ),
@@ -954,4 +925,5 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       ],
     );
   }
+
 }

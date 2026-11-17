@@ -95,7 +95,9 @@ class SearchVideoItemModel {
     videoReview = json['video_review'];
     pubdate = json['pubdate'];
     senddate = json['senddate'];
-    duration = Utils.duration(json['duration']);
+    duration = json['duration'] != null
+        ? Utils.duration(json['duration'].toString())
+        : 0;
     owner = Owner.fromJson(json);
     stat = Stat.fromJson(json);
   }
@@ -122,11 +124,21 @@ class Stat {
   int? like;
 
   Stat.fromJson(Map<String, dynamic> json) {
-    view = json['play'];
-    danmaku = json['danmaku'];
-    favorite = json['favorite'];
-    reply = json['review'];
-    like = json['like'];
+    view = json['play'] is int
+        ? json['play']
+        : int.tryParse(json['play']?.toString() ?? '');
+    danmaku = json['danmaku'] is int
+        ? json['danmaku']
+        : int.tryParse(json['danmaku']?.toString() ?? '');
+    favorite = json['favorite'] is int
+        ? json['favorite']
+        : int.tryParse(json['favorite']?.toString() ?? '');
+    reply = json['review'] is int
+        ? json['review']
+        : int.tryParse(json['review']?.toString() ?? '');
+    like = json['like'] is int
+        ? json['like']
+        : int.tryParse(json['like']?.toString() ?? '');
   }
 }
 
@@ -151,9 +163,11 @@ class SearchUserModel {
   SearchUserModel({this.list});
   List<SearchUserItemModel>? list;
   SearchUserModel.fromJson(Map<String, dynamic> json) {
-    list = json['result']
-        .map<SearchUserItemModel>((e) => SearchUserItemModel.fromJson(e))
-        .toList();
+    list = json['result'] != null
+        ? json['result']
+            .map<SearchUserItemModel>((e) => SearchUserItemModel.fromJson(e))
+            .toList()
+        : [];
   }
 }
 
@@ -218,9 +232,11 @@ class SearchLiveModel {
   SearchLiveModel({this.list});
   List<SearchLiveItemModel>? list;
   SearchLiveModel.fromJson(Map<String, dynamic> json) {
-    list = json['result']
-        .map<SearchLiveItemModel>((e) => SearchLiveItemModel.fromJson(e))
-        .toList();
+    list = json['result'] != null
+        ? json['result']
+            .map<SearchLiveItemModel>((e) => SearchLiveItemModel.fromJson(e))
+            .toList()
+        : [];
   }
 }
 

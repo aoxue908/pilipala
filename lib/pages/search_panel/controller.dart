@@ -30,11 +30,11 @@ class SearchPanelController extends GetxController {
       duration: searchType!.type != 'video' ? null : duration.value,
       tids: searchType!.type != 'video' ? null : tids.value,
     );
-    if (result['status']) {
+    if (result != null && result['status'] == true) {
       if (type == 'onRefresh') {
-        resultList.value = result['data'].list ?? [];
+        resultList.value = result['data'] != null ? (result['data'].list ?? []) : [];
       } else {
-        resultList.addAll(result['data'].list ?? []);
+        resultList.addAll(result['data'] != null ? (result['data'].list ?? []) : []);
       }
       page.value++;
       onPushDetail(keyword, resultList);

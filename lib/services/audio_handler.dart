@@ -26,7 +26,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   static final List<MediaItem> _item = [];
   Box setting = GStrorage.setting;
   bool enableBackgroundPlay = false;
-  PlPlayerController player = PlPlayerController();
+  late PlPlayerController player = PlPlayerController();
 
   VideoPlayerServiceHandler() {
     revalidateSetting();

@@ -8,6 +8,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:ns_danmaku/ns_danmaku.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:pilipala/http/user.dart';
 import 'package:pilipala/models/video/play/quality.dart';
 import 'package:pilipala/models/video/play/url.dart';
@@ -16,6 +17,13 @@ import 'package:pilipala/pages/video/detail/index.dart';
 import 'package:pilipala/pages/video/detail/introduction/widgets/menu_row.dart';
 import 'package:pilipala/plugin/pl_player/index.dart';
 import 'package:pilipala/plugin/pl_player/models/play_repeat.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/caption_preferences.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/caption_translator.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/caption_tts_dialog.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/caption_tts_service.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/ieeio_login.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/local_asr_model.dart';
+import 'package:pilipala/plugin/pl_player/realtime_caption/realtime_captions.dart';
 import 'package:pilipala/utils/storage.dart';
 import 'package:pilipala/services/shutdown_timer_service.dart';
 import '../../../../http/danmaku.dart';
@@ -182,6 +190,22 @@ class _HeaderControlState extends State<HeaderControl> {
                             '当前音质 ${widget.videoDetailCtr!.currentAudioQa!.description}',
                             style: subTitleStyle),
                       ),
+                    ListTile(
+                      onTap: () {
+                        Get.back();
+                        showSubtitleDialog();
+                      },
+                      dense: true,
+                      leading:
+                          const Icon(Icons.closed_caption_outlined, size: 20),
+                      title: const Text('字幕与语音识别', style: titleStyle),
+                      subtitle: Text(
+                        widget.controller?.realtimeCaptions.enabled == true
+                            ? '已开启'
+                            : '已关闭',
+                        style: subTitleStyle,
+                      ),
+                    ),
                     if (widget.videoDetailCtr!.currentDecodeFormats != null)
                       ListTile(
                         onTap: () => {Get.back(), showSetDecodeFormats()},
@@ -425,64 +449,1030 @@ class _HeaderControlState extends State<HeaderControl> {
     );
   }
 
-  /// 选择字幕
-  void showSubtitleDialog() async {
-    int tempThemeValue = widget.controller!.subTitleCode.value;
-    final List subtitles = widget.videoDetailCtr!.subtitles;
-    int len = subtitles.length;
-    if (subtitles.firstWhereOrNull((element) => element.id == tempThemeValue) ==
-        null) {
-      tempThemeValue = -1;
-    }
-    showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: const Text('选择字幕'),
-            contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 18),
-            content: StatefulBuilder(
-              builder: (context, StateSetter setState) {
-                return len == 0
-                    ? const SizedBox(
-                        height: 60,
-                        child: Center(
-                          child: Text('没有字幕'),
-                        ),
-                      )
-                    : SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
+  void showSubtitleDialog() {
+    final player = widget.controller!;
+    final captions = player.realtimeCaptions;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('字幕与语音识别'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(
+                ClipboardData(text: captions.asrDiagnostics),
+              );
+              SmartDialog.showToast('已复制字幕诊断');
+            },
+            child: const Text('复制诊断'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('完成'),
+          ),
+        ],
+        contentPadding: const EdgeInsets.only(top: 8, bottom: 12),
+        content: SizedBox(
+          width: 380,
+          child: Obx(() {
+            final tracks = captions.tracks.toList();
+            final selected = captions.selectedTrack.value;
+            final asrError = captions.asrError.value;
+            final translationError = captions.translationError.value;
+            final status = captions.status.value;
+            final currentLang = captions.targetLanguage.value;
+            final currentLangName =
+                CaptionTranslator.supportedLanguages[currentLang] ?? '简体中文';
+            final currentSelected = selected == RealtimeCaptions.automaticTrack
+                ? (captions.isNativeSubtitle
+                    ? (tracks.firstOrNull?.id ??
+                        (captions.useLocalAsr.value
+                            ? RealtimeCaptions.realtimeLocalTrack
+                            : RealtimeCaptions.realtimeCloudTrack))
+                    : (captions.useLocalAsr.value
+                        ? RealtimeCaptions.realtimeLocalTrack
+                        : RealtimeCaptions.realtimeCloudTrack))
+                : selected;
+
+            return SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 顶部字幕来源状态卡片
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: captions.isNativeSubtitle
+                          ? Colors.blue.withOpacity(0.08)
+                          : (captions.isUsingLocalAsr
+                              ? Colors.green.withOpacity(0.08)
+                              : Colors.purple.withOpacity(0.08)),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: captions.isNativeSubtitle
+                            ? Colors.blue.withOpacity(0.3)
+                            : (captions.isUsingLocalAsr
+                                ? Colors.green.withOpacity(0.3)
+                                : Colors.purple.withOpacity(0.3)),
+                        width: 1,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
                           children: [
-                            RadioListTile(
-                              value: -1,
-                              title: const Text('关闭字幕'),
-                              groupValue: tempThemeValue,
-                              onChanged: (value) {
-                                tempThemeValue = value!;
-                                widget.controller?.toggleSubtitle(value);
-                                Get.back();
-                              },
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: captions.isNativeSubtitle
+                                    ? Colors.blue
+                                    : (captions.isUsingLocalAsr ? Colors.green : Colors.purple),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                captions.activeSourceTag.isNotEmpty
+                                    ? captions.activeSourceTag
+                                    : (captions.isNativeSubtitle
+                                        ? '[B站官方]'
+                                        : (captions.isUsingLocalAsr ? '[本地离线]' : '[云端在线]')),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
                             ),
-                            ...widget.videoDetailCtr!.subtitles
-                                .map((e) => RadioListTile(
-                                      value: e.id,
-                                      title: Text(e.title),
-                                      groupValue: tempThemeValue,
-                                      onChanged: (value) {
-                                        tempThemeValue = value!;
-                                        widget.controller
-                                            ?.toggleSubtitle(value);
-                                        Get.back();
-                                      },
-                                    ))
-                                .toList(),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                captions.activeSourceDescription.isNotEmpty
+                                    ? captions.activeSourceDescription
+                                    : (captions.isNativeSubtitle
+                                        ? 'B 站自带官方字幕轨'
+                                        : (captions.isUsingLocalAsr
+                                            ? 'Sherpa-ONNX 本地离线识别'
+                                            : 'Qwen ASR 云端实时识别')),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
                           ],
                         ),
-                      );
+                        if (tracks.isEmpty) ...[
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              Icon(Icons.info_outline_rounded,
+                                  size: 14, color: Theme.of(context).colorScheme.outline),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  captions.needLoginForSubtitles.value
+                                      ? '该视频官方字幕需登录后查看，登录后即可显示官方自带字幕'
+                                      : '当前视频无 B 站官方自带字幕轨，已自动启用实时语音识别',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Theme.of(context).colorScheme.outline,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (captions.needLoginForSubtitles.value) ...[
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                                icon: const Icon(Icons.login_rounded, size: 16),
+                                label: const Text('前往登录获取官方字幕', style: TextStyle(fontSize: 12)),
+                                onPressed: () {
+                                  Navigator.of(context).pop();
+                                  Get.toNamed('/login');
+                                },
+                              ),
+                            ),
+                          ],
+                        ],
+                        if (captions.cloudLagWarning.value &&
+                            !captions.isUsingLocalAsr &&
+                            !captions.isNativeSubtitle) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.amber.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.amber.withOpacity(0.4)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.warning_amber_rounded, size: 14, color: Colors.amber),
+                                SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    '云端网络转写延迟过大，建议下方切换为「Sherpa-ONNX 本地离线识别」',
+                                    style: TextStyle(fontSize: 11, color: Colors.orange),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  SwitchListTile(
+                    title: const Text('显示原文'),
+                    subtitle: Text(IeeioLogin.supported
+                        ? '优先使用 B 站字幕，缺少时识别音轨原语言'
+                        : '使用视频自带字幕'),
+                    value: captions.showOriginal.value,
+                    onChanged: captions.setOriginal,
+                  ),
+                  if (tracks.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          const Text('官方字幕语言: ',
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                          const Spacer(),
+                          DropdownButton<int>(
+                            value: tracks.any((t) => t.id == currentSelected)
+                                ? currentSelected
+                                : (tracks.firstOrNull?.id),
+                            isDense: true,
+                            items: tracks
+                                .map((t) => DropdownMenuItem(
+                                      value: t.id!,
+                                      child: Text(
+                                        t.lanDoc ?? t.title ?? t.lan ?? '默认',
+                                        style: const TextStyle(fontSize: 13),
+                                      ),
+                                    ))
+                                .toList(),
+                            onChanged: (trackId) {
+                              if (trackId != null) {
+                                captions.selectTrack(trackId);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  SwitchListTile(
+                    title: const Text('显示译文'),
+                    subtitle: Text('翻译为: $currentLangName'),
+                    value: captions.showTranslation.value,
+                    onChanged: captions.setTranslation,
+                  ),
+                  if (captions.showTranslation.value)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          const Text('译文目标语言: ', style: TextStyle(fontSize: 13)),
+                          const Spacer(),
+                          DropdownButton<String>(
+                            value: currentLang,
+                            isDense: true,
+                            items: CaptionTranslator.supportedLanguages.entries
+                                .map((e) => DropdownMenuItem(
+                                      value: e.key,
+                                      child: Text(e.value,
+                                          style: const TextStyle(fontSize: 13)),
+                                    ))
+                                .toList(),
+                            onChanged: (lang) {
+                              if (lang != null) {
+                                captions.setTargetLanguage(lang);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  SwitchListTile(
+                    title: const Text('显示发音注音'),
+                    subtitle: const Text('中文拼音、粤拼、日语假名/罗马音、韩语发音、英语音标'),
+                    value: captions.showPronunciation.value,
+                    onChanged: captions.setPronunciation,
+                  ),
+                  if (captions.showPronunciation.value) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          const Text('中文/粤语注音: ', style: TextStyle(fontSize: 13)),
+                          const Spacer(),
+                          DropdownButton<String>(
+                            value: captions.chinesePhonetic.value,
+                            isDense: true,
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'auto',
+                                child: Text('智能识别 (粤拼/普通话)',
+                                    style: TextStyle(fontSize: 13)),
+                              ),
+                              DropdownMenuItem(
+                                value: 'cantonese',
+                                child: Text('粤语拼音 (Jyutping)',
+                                    style: TextStyle(fontSize: 13)),
+                              ),
+                              DropdownMenuItem(
+                                value: 'mandarin',
+                                child: Text('普通话拼音 (Pinyin)',
+                                    style: TextStyle(fontSize: 13)),
+                              ),
+                            ],
+                            onChanged: (mode) {
+                              if (mode != null) {
+                                captions.setChinesePhonetic(mode);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          const Text('日语注音类型: ', style: TextStyle(fontSize: 13)),
+                          const Spacer(),
+                          DropdownButton<String>(
+                            value: captions.japanesePhonetic.value,
+                            isDense: true,
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'kana',
+                                child: Text('假名 (Kana)',
+                                    style: TextStyle(fontSize: 13)),
+                              ),
+                              DropdownMenuItem(
+                                value: 'romaji',
+                                child: Text('罗马音 (Romaji)',
+                                    style: TextStyle(fontSize: 13)),
+                              ),
+                            ],
+                            onChanged: (mode) {
+                              if (mode != null) {
+                                captions.setJapanesePhonetic(mode);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          const Text('注音颜色: ', style: TextStyle(fontSize: 13)),
+                          const Spacer(),
+                          DropdownButton<int>(
+                            value: player.captionPreferences.appearance.value.pronunciationColor,
+                            isDense: true,
+                            items: [
+                              for (final color in CaptionPreferences.pronunciationColors.entries)
+                                DropdownMenuItem(
+                                  value: color.key,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.circle, size: 14, color: Color(color.key)),
+                                      const SizedBox(width: 6),
+                                      Text(color.value, style: const TextStyle(fontSize: 13)),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                            onChanged: (value) {
+                              if (value != null) {
+                                player.captionPreferences.update(pronunciationColor: value);
+                                player.captionPreferences.save();
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  SwitchListTile(
+                    title: const Text('点击字幕查词（智能查词）'),
+                    subtitle: const Text('点击字幕单词自动暂停播放，查看音标发音、详细释义与例句'),
+                    value: player.captionPreferences.enableWordLookup.value,
+                    onChanged: (val) {
+                      player.captionPreferences.enableWordLookup.value = val;
+                      player.captionPreferences.save();
+                    },
+                  ),
+                  ListTile(
+                    title: const Text('查词与注音发音人设置'),
+                    subtitle: Text(
+                      CaptionTtsService.shared.config.engine == 'mimo'
+                          ? '当前: 小米 MiMo-V2.5-TTS (${CaptionTtsService.shared.config.mimoVoice}) · 限时免费'
+                          : (CaptionTtsService.shared.config.engine == 'system'
+                              ? '当前: 设备系统原生离线 TTS'
+                              : '当前: Microsoft Edge-TTS (${CaptionTtsService.edgeCantoneseVoices[CaptionTtsService.shared.config.edgeCantoneseVoice]?.split(' ').first ?? '晓曼'})'),
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+                    onTap: () async {
+                      await showTtsVoiceSettingsDialog(context);
+                    },
+                  ),
+                  if (asrError.isNotEmpty || translationError.isNotEmpty)
+                    ListTile(
+                      dense: true,
+                      title: Text(
+                        [asrError, translationError]
+                            .where((message) => message.isNotEmpty)
+                            .join('\n'),
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                      ),
+                      trailing: TextButton(
+                        onPressed: captions.retry,
+                        child: const Text('重试'),
+                      ),
+                    )
+                  else if (status.isNotEmpty)
+                    ListTile(
+                      dense: true,
+                      title: Text(status,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary,
+                              fontSize: 12)),
+                    ),
+                  const Divider(),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: Text(
+                      '选择字幕源 / 识别方式',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ),
+                  if (tracks.isNotEmpty)
+                    for (final track in tracks)
+                      RadioListTile<int>(
+                        dense: true,
+                        value: track.id!,
+                        title: Text(
+                          'B站官方字幕 · ${track.lanDoc ?? track.title ?? track.lan ?? "默认"}',
+                        ),
+                        subtitle: Text(
+                          track.isAi
+                              ? 'B 站官方 AI 自动听写/翻译字幕'
+                              : '视频自带官方字幕轨，内容准确',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        groupValue: currentSelected,
+                        onChanged: (value) => captions.selectTrack(value!),
+                      ),
+                  if (IeeioLogin.supported)
+                    RadioListTile<int>(
+                      dense: true,
+                      value: RealtimeCaptions.realtimeCloudTrack,
+                      title: Row(
+                        children: [
+                          const Flexible(
+                            child: Text(
+                              '实时语音识别 (云端在线 · Qwen ASR)',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          InkWell(
+                            onTap: () async {
+                              if (Platform.isAndroid || Platform.isIOS) {
+                                await Get.toNamed(
+                                  '/webview',
+                                  parameters: {
+                                    'url': 'https://asr.ieeio.com/login',
+                                    'type': 'asr_login',
+                                    'pageTitle': 'Qwen ASR 登录',
+                                  },
+                                );
+                              } else {
+                                try {
+                                  await launchUrl(
+                                    Uri.parse('https://asr.ieeio.com/login'),
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                } catch (_) {}
+                              }
+                              // 从登录页面返回后立即清空内存中的老旧 Demo Token，无缝读取新会话
+                              IeeioLogin.shared.clearCachedToken();
+                            },
+                            borderRadius: BorderRadius.circular(4),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.6),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.open_in_browser_rounded, size: 12, color: Theme.of(context).colorScheme.primary),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    '登录网页',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Theme.of(context).colorScheme.primary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      subtitle: const Text('通义千问在线流式识别，需网络',
+                          style: TextStyle(fontSize: 11)),
+                      groupValue: currentSelected,
+                      onChanged: (value) {
+                        captions.setLocalAsr(false);
+                        SmartDialog.showToast('已切换至 Qwen 云端在线识别');
+                      },
+                    ),
+                  RadioListTile<int>(
+                    dense: true,
+                    value: RealtimeCaptions.realtimeLocalTrack,
+                    title: const Text('实时语音识别 (本地离线 · Sherpa-ONNX)'),
+                    subtitle: const Text('设备本地离线模型，隐私安全，无网络开销',
+                        style: TextStyle(fontSize: 11)),
+                    groupValue: currentSelected,
+                    onChanged: (value) {
+                      captions.setLocalAsr(true);
+                      SmartDialog.showToast('已切换至 Sherpa 本地离线识别');
+                    },
+                  ),
+                  const Divider(),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: Text(
+                      '离线语音识别模型配置',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ),
+                  _asrEngineSettings(captions),
+                  const Divider(),
+                  _captionSyncSettings(captions),
+                  const Divider(),
+                  _captionStyleSettings(player.captionPreferences),
+                ],
+              ),
+            );
+          }),
+        ),
+      ),
+    );
+  }
+
+  Widget _asrEngineSettings(RealtimeCaptions captions) {
+    final modelMgr = LocalAsrModelManager.shared;
+    return Obx(() {
+      final selectedModelId = captions.localAsrModel.value;
+      final selectedModel = LocalAsrModelManager.availableModels[selectedModelId] ??
+          LocalAsrModelManager.availableModels['sense_voice']!;
+
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              children: [
+                const Text('离线模型: ', style: TextStyle(fontSize: 13)),
+                const Spacer(),
+                DropdownButton<String>(
+                  value: selectedModelId,
+                  isDense: true,
+                  items: LocalAsrModelManager.availableModels.values
+                      .map((cfg) => DropdownMenuItem(
+                            value: cfg.id,
+                            child: Text(
+                              '${cfg.name} (${cfg.sizeDesc})',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: (id) {
+                    if (id != null) {
+                      captions.setLocalAsrModel(id);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    selectedModel.engineTag,
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    selectedModel.languagesDesc,
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          FutureBuilder<bool>(
+            key: ValueKey(selectedModelId),
+            future: modelMgr.isModelReady(selectedModelId),
+            builder: (context, snapshot) {
+              final isReady = snapshot.data ?? false;
+              return Obx(() {
+                final isDownloading = modelMgr.isDownloading.value;
+                final progress = modelMgr.downloadProgress.value;
+                final status = modelMgr.downloadStatus.value;
+                return Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            isReady ? Icons.check_circle : Icons.info_outline,
+                            color: isReady ? Colors.green : Colors.orange,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              isReady
+                                  ? '${selectedModel.name} 已就绪 (可离线运行)'
+                                  : '${selectedModel.name} 未就绪 (${selectedModel.sizeDesc})',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                            ),
+                          ),
+                          if (isDownloading)
+                            TextButton(
+                              onPressed: modelMgr.cancelDownload,
+                              child: const Text('取消'),
+                            )
+                          else ...[
+                            if (isReady)
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+                                tooltip: '删除模型以释放空间',
+                                onPressed: () async {
+                                  await modelMgr.deleteModel(selectedModelId);
+                                  SmartDialog.showToast('已删除 ${selectedModel.name} 本地文件');
+                                  captions.retry();
+                                },
+                              ),
+                            FilledButton.tonal(
+                              style: FilledButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(horizontal: 10),
+                              ),
+                              onPressed: () async {
+                                try {
+                                  await modelMgr.downloadModel(modelId: selectedModelId);
+                                  SmartDialog.showToast('${selectedModel.name} 下载完成');
+                                  captions.retry();
+                                } catch (e) {
+                                  SmartDialog.showToast('下载失败: $e');
+                                }
+                              },
+                              child: Text(isReady ? '重新下载' : '立即下载',
+                                  style: const TextStyle(fontSize: 12)),
+                            ),
+                          ],
+                        ],
+                      ),
+                      if (isDownloading) ...[
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(value: progress),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          status,
+                          style: const TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              });
+            },
+          ),
+        ],
+      );
+    });
+  }
+
+  Widget _captionSyncSettings(RealtimeCaptions captions) {
+    return Obx(() {
+      final delayMs = captions.captionDelayMs.value;
+      final String delayDesc;
+      if (delayMs == 0) {
+        delayDesc = '正常 (0 ms)';
+      } else if (delayMs < 0) {
+        delayDesc = '提前 ${-delayMs} ms (${(-delayMs / 1000).toStringAsFixed(2)}s)';
+      } else {
+        delayDesc = '延后 $delayMs ms (${(delayMs / 1000).toStringAsFixed(2)}s)';
+      }
+
+      return ExpansionTile(
+        key: const PageStorageKey('video-caption-sync'),
+        initiallyExpanded: delayMs != 0,
+        title: const Text('字幕时间轴 / 同步校准'),
+        subtitle: Text(
+          delayMs == 0 ? '字幕慢一拍或快一拍时可在此微调' : delayDesc,
+          style: TextStyle(
+            fontSize: 12,
+            color: delayMs != 0
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).colorScheme.outline,
+          ),
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '当前校准: $delayDesc',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+                if (delayMs != 0)
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () => captions.setCaptionDelay(0),
+                    child: const Text('重置为 0'),
+                  ),
+              ],
+            ),
+          ),
+          // 快捷预设
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    minimumSize: const Size(64, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(-200),
+                  child: const Text('慢一拍(-0.2s)', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    minimumSize: const Size(64, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(-500),
+                  child: const Text('慢半拍(-0.5s)', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    minimumSize: const Size(40, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(0),
+                  child: const Text('重置', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    minimumSize: const Size(64, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(200),
+                  child: const Text('快一拍(+0.2s)', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    minimumSize: const Size(64, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(500),
+                  child: const Text('快半拍(+0.5s)', style: TextStyle(fontSize: 10)),
+                ),
+              ],
+            ),
+          ),
+          // 50ms / 100ms / 500ms 精细步进微调
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs - 500),
+                  child: const Text('-500', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs - 100),
+                  child: const Text('-100', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs - 50),
+                  child: const Text('-50ms', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs + 50),
+                  child: const Text('+50ms', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs + 100),
+                  child: const Text('+100', style: TextStyle(fontSize: 10)),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: const Size(44, 28),
+                  ),
+                  onPressed: () => captions.setCaptionDelay(delayMs + 500),
+                  child: const Text('+500', style: TextStyle(fontSize: 10)),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Slider(
+              min: -3000.0,
+              max: 3000.0,
+              divisions: 120, // 50ms 逐级精准微调
+              value: delayMs.toDouble().clamp(-3000.0, 3000.0),
+              label: delayDesc,
+              onChanged: (val) => captions.setCaptionDelay(val.round()),
+            ),
+          ),
+          const SizedBox(height: 6),
+        ],
+      );
+    });
+  }
+
+  Widget _captionStyleSettings(CaptionPreferences preferences) {
+    return Obx(() {
+      final appearance = preferences.appearance.value;
+      final hasCustomPos = appearance.alignX != null || appearance.alignY != null;
+      return ExpansionTile(
+        key: const PageStorageKey('video-caption-style'),
+        title: const Text('字幕样式与外观'),
+        children: [
+          ListTile(
+            title: const Text('字幕颜色'),
+            trailing: DropdownButton<int>(
+              value: appearance.captionColor,
+              items: [
+                for (final color in CaptionPreferences.captionColors.entries)
+                  DropdownMenuItem(
+                    value: color.key,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.circle, size: 16, color: Color(color.key)),
+                        const SizedBox(width: 8),
+                        Text(color.value),
+                      ],
+                    ),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  preferences.update(captionColor: value);
+                  preferences.save();
+                }
               },
             ),
-          );
-        });
+          ),
+          ListTile(
+            title: const Text('注音发音颜色'),
+            trailing: DropdownButton<int>(
+              value: appearance.pronunciationColor,
+              items: [
+                for (final color in CaptionPreferences.pronunciationColors.entries)
+                  DropdownMenuItem(
+                    value: color.key,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.circle, size: 16, color: Color(color.key)),
+                        const SizedBox(width: 8),
+                        Text(color.value),
+                      ],
+                    ),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  preferences.update(pronunciationColor: value);
+                  preferences.save();
+                }
+              },
+            ),
+          ),
+          _captionSlider(
+            '字体大小',
+            appearance.fontSize,
+            min: 12,
+            max: 32,
+            divisions: 20,
+            label: '${appearance.fontSize.round()}',
+            onChanged: (value) => preferences.update(fontSize: value),
+            onSaved: preferences.save,
+          ),
+          _captionSlider(
+            '背景不透明度',
+            appearance.backgroundOpacity,
+            min: 0,
+            max: 1,
+            divisions: 20,
+            label: '${(appearance.backgroundOpacity * 100).round()}%',
+            onChanged: (value) => preferences.update(backgroundOpacity: value),
+            onSaved: preferences.save,
+          ),
+          _captionSlider(
+            '距离底边',
+            appearance.bottom,
+            min: 0,
+            max: 96,
+            divisions: 48,
+            label: '${appearance.bottom.round()}',
+            onChanged: (value) => preferences.update(bottom: value, clearCustomPosition: true),
+            onSaved: preferences.save,
+          ),
+          ListTile(
+            dense: true,
+            title: const Text('拖动字幕位置', style: TextStyle(fontSize: 14)),
+            subtitle: Text(
+              hasCustomPos ? '已自定义拖动位置（可直接在画面中按住字幕拖动）' : '默认居中（可直接在画面中按住字幕拖动）',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+            trailing: hasCustomPos
+                ? TextButton.icon(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: const Icon(Icons.restart_alt, size: 16),
+                    label: const Text('恢复默认', style: TextStyle(fontSize: 12)),
+                    onPressed: () {
+                      preferences.resetPosition();
+                      SmartDialog.showToast('已恢复默认字幕位置');
+                    },
+                  )
+                : null,
+          ),
+        ],
+      );
+    });
+  }
+
+  Widget _captionSlider(
+    String title,
+    double value, {
+    required double min,
+    required double max,
+    required int divisions,
+    required String label,
+    required ValueChanged<double> onChanged,
+    required VoidCallback onSaved,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$title  $label'),
+          Slider(
+            min: min,
+            max: max,
+            divisions: divisions,
+            value: value,
+            semanticFormatterCallback: (_) => '$title $label',
+            onChanged: onChanged,
+            onChangeEnd: (_) => onSaved(),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 选择倍速
@@ -1256,6 +2246,7 @@ class _HeaderControlState extends State<HeaderControl> {
               );
             },
           ),
+          SizedBox(width: buttonSpace),
           if (isFullScreen.value) ...[
             SizedBox(
               width: 56,
@@ -1292,70 +2283,78 @@ class _HeaderControlState extends State<HeaderControl> {
                 ),
               ),
             ),
-          ],
-          SizedBox(width: buttonSpace),
-          if (Platform.isAndroid) ...<Widget>[
-            SizedBox(
-              width: 34,
-              height: 34,
-              child: IconButton(
-                style: ButtonStyle(
-                  padding: MaterialStateProperty.all(EdgeInsets.zero),
+            SizedBox(width: buttonSpace),
+            if (Platform.isAndroid) ...<Widget>[
+              SizedBox(
+                width: 34,
+                height: 34,
+                child: IconButton(
+                  style: ButtonStyle(
+                    padding: MaterialStateProperty.all(EdgeInsets.zero),
+                  ),
+                  onPressed: () async {
+                    bool canUsePiP = false;
+                    widget.controller!.hiddenControls(false);
+                    try {
+                      canUsePiP = await widget.floating!.isPipAvailable;
+                    } on PlatformException catch (_) {
+                      canUsePiP = false;
+                    }
+                    if (canUsePiP) {
+                      final Rational aspectRatio = Rational(
+                        widget.videoDetailCtr!.data.dash!.video!.first.width!,
+                        widget.videoDetailCtr!.data.dash!.video!.first.height!,
+                      );
+                      await widget.floating!.enable(aspectRatio: aspectRatio);
+                    } else {}
+                  },
+                  icon: const Icon(
+                    Icons.picture_in_picture_outlined,
+                    size: 19,
+                    color: Colors.white,
+                  ),
                 ),
-                onPressed: () async {
-                  bool canUsePiP = false;
-                  widget.controller!.hiddenControls(false);
-                  try {
-                    canUsePiP = await widget.floating!.isPipAvailable;
-                  } on PlatformException catch (_) {
-                    canUsePiP = false;
-                  }
-                  if (canUsePiP) {
-                    final Rational aspectRatio = Rational(
-                      widget.videoDetailCtr!.data.dash!.video!.first.width!,
-                      widget.videoDetailCtr!.data.dash!.video!.first.height!,
-                    );
-                    await widget.floating!.enable(aspectRatio: aspectRatio);
-                  } else {}
-                },
-                icon: const Icon(
-                  Icons.picture_in_picture_outlined,
-                  size: 19,
-                  color: Colors.white,
+              ),
+              SizedBox(width: buttonSpace),
+            ],
+            Obx(
+              () => SizedBox(
+                width: 45,
+                height: 34,
+                child: TextButton(
+                  style: ButtonStyle(
+                    padding: MaterialStateProperty.all(EdgeInsets.zero),
+                  ),
+                  onPressed: () => showSetSpeedSheet(),
+                  child: Text(
+                    '${_.playbackSpeed}X',
+                    style: textStyle,
+                  ),
                 ),
               ),
             ),
             SizedBox(width: buttonSpace),
           ],
 
-          /// 字幕
-          if (widget.showSubtitleBtn ?? true)
-            ComBtn(
-              icon: const Icon(
-                Icons.closed_caption_off,
-                size: 22,
-                color: Colors.white,
-              ),
-              fuc: () => showSubtitleDialog(),
-            ),
-          SizedBox(width: buttonSpace),
-          Obx(
-            () => SizedBox(
-              width: 45,
-              height: 34,
-              child: TextButton(
-                style: ButtonStyle(
-                  padding: MaterialStateProperty.all(EdgeInsets.zero),
+          /// 字幕按钮 (竖屏与全屏均常驻显示，方便快速开启/设置字幕)
+          if (widget.showSubtitleBtn ?? true) ...[
+            Obx(
+              () => ComBtn(
+                icon: Icon(
+                  _.realtimeCaptions.enabled
+                      ? Icons.closed_caption
+                      : Icons.closed_caption_off,
+                  size: 22,
+                  color: Colors.white,
+                  semanticLabel: '字幕与翻译',
                 ),
-                onPressed: () => showSetSpeedSheet(),
-                child: Text(
-                  '${_.playbackSpeed}X',
-                  style: textStyle,
-                ),
+                fuc: showSubtitleDialog,
               ),
             ),
-          ),
-          SizedBox(width: buttonSpace),
+            SizedBox(width: buttonSpace),
+          ],
+
+          /// 更多设置 (竖屏与全屏均常驻显示)
           ComBtn(
             icon: const Icon(
               Icons.more_vert_outlined,
