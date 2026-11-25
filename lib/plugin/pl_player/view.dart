@@ -42,6 +42,8 @@ class PLVideoPlayer extends StatefulWidget {
     this.customWidgets,
     this.showEposideCb,
     this.fullScreenCb,
+    this.swipeNextCb,
+    this.swipePreviousCb,
     this.alignment = Alignment.center,
     super.key,
   });
@@ -57,6 +59,8 @@ class PLVideoPlayer extends StatefulWidget {
   final List<Widget>? customWidgets;
   final Function? showEposideCb;
   final Function? fullScreenCb;
+  final VoidCallback? swipeNextCb;
+  final VoidCallback? swipePreviousCb;
   final Alignment? alignment;
 
   @override
@@ -83,6 +87,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   final RxDouble _distance = 0.0.obs;
   final RxBool _volumeInterceptEventStream = false.obs;
+
+  // 竖屏上下切换视频手势：只累计位移，松手后触发，避免与点击/进度手势混淆。
+  double _portraitDragDistance = 0;
+  final RxBool _portraitSwitchIndicator = false.obs;
+  final RxBool _portraitSwitchNext = true.obs;
 
   Box setting = GStrorage.setting;
   late FullScreenMode mode;
@@ -203,6 +212,32 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       }
     });
     widget.controller.brightness.value = value;
+  }
+
+  void _startPortraitSwitch() {
+    _portraitDragDistance = 0;
+    _portraitSwitchIndicator.value = false;
+  }
+
+  void _updatePortraitSwitch(DragUpdateDetails details) {
+    _portraitDragDistance += details.delta.dy;
+    _portraitSwitchNext.value = _portraitDragDistance <= 0;
+    _portraitSwitchIndicator.value = true;
+  }
+
+  void _finishPortraitSwitch() {
+    final double distance = _portraitDragDistance;
+    final bool shouldSwitch = _portraitSwitchIndicator.value &&
+        !widget.controller.controlsLock.value &&
+        distance.abs() >= 72;
+    _startPortraitSwitch();
+    if (!shouldSwitch || !mounted) return;
+    feedBack();
+    if (distance < 0) {
+      widget.swipeNextCb?.call();
+    } else {
+      widget.swipePreviousCb?.call();
+    }
   }
 
   @override
@@ -329,12 +364,36 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         ),
       ),
 
-      /// 字幕
-      /// 全屏
+      /// 竖屏全屏开关：保持竖屏方向，隐藏状态栏与页面其余内容，视频撑满竖屏
+      /// 图标为直角折角（进入时朝外、退出时朝内），与横屏按钮权责分离
+      BottomControlType.verticalFullscreen: ComBtn(
+        icon: Obx(
+          () => Icon(
+            _.isFullScreen.value && _.isVerticalFullScreen.value
+                ? Icons.fullscreen_exit
+                : Icons.crop_portrait,
+            size: 19,
+            color: Colors.white,
+          ),
+        ),
+        fuc: () {
+          // 若当前正处于竖屏全屏 → 退出；否则以竖屏方向进入全屏
+          final bool alreadyVerticalFull = _.isFullScreen.value &&
+              _.isVerticalFullScreen.value;
+          final bool nextStatus = !alreadyVerticalFull;
+          _.triggerFullScreen(
+            status: nextStatus,
+            forceMode: FullScreenMode.vertical,
+          );
+          widget.fullScreenCb?.call(nextStatus);
+        },
+      ),
+
+      /// 横屏全屏开关：旋转到横屏并撑满（沿用原逻辑）
       BottomControlType.fullscreen: ComBtn(
         icon: Obx(
           () => Icon(
-            _.isFullScreen.value
+            _.isFullScreen.value && !_.isVerticalFullScreen.value
                 ? FontAwesomeIcons.compress
                 : FontAwesomeIcons.expand,
             size: 15,
@@ -342,8 +401,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           ),
         ),
         fuc: () {
-          _.triggerFullScreen(status: !_.isFullScreen.value);
-          widget.fullScreenCb?.call(!_.isFullScreen.value);
+          // 若当前正处于横屏全屏 → 退出；否则（含竖屏全屏）→ 切到横屏全屏
+          final bool alreadyHorizontalFull =
+              _.isFullScreen.value && !_.isVerticalFullScreen.value;
+          final bool nextStatus = !alreadyHorizontalFull;
+          _.triggerFullScreen(
+            status: nextStatus,
+            forceMode: FullScreenMode.horizontal,
+          );
+          widget.fullScreenCb?.call(nextStatus);
         },
       ),
     };
@@ -354,6 +420,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           BottomControlType.time,
           BottomControlType.space,
           BottomControlType.fit,
+          BottomControlType.verticalFullscreen,
           BottomControlType.fullscreen,
         ];
     for (var i = 0; i < userSpecifyItem.length; i++) {
@@ -513,6 +580,48 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           ),
         ),
 
+        /// 竖屏切换视频提示
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Obx(() {
+              if (!_portraitSwitchIndicator.value) {
+                return const SizedBox.shrink();
+              }
+              final bool next = _portraitSwitchNext.value;
+              return Center(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.65),
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        next
+                            ? Icons.keyboard_arrow_up_rounded
+                            : Icons.keyboard_arrow_down_rounded,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        next ? '松开切换下一个' : '松开切换上一个',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
+
         // Obx(() {
         //   if (_.buffered.value == Duration.zero) {
         //     return Positioned.fill(
@@ -596,8 +705,22 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
               _.onChangedSliderEnd();
               _.seekTo(_.sliderPosition.value, type: 'slider');
             },
-            // 垂直方向 音量/亮度调节
+            // 竖屏：上下滑动切换视频；横屏等其他方向：保留亮度/全屏/音量手势。
+            onVerticalDragStart: (DragStartDetails details) {
+              _startPortraitSwitch();
+            },
             onVerticalDragUpdate: (DragUpdateDetails details) async {
+              /// 锁定时禁用
+              if (_.controlsLock.value) {
+                return;
+              }
+              final bool isPortrait =
+                  MediaQuery.of(context).orientation == Orientation.portrait;
+              if (isPortrait) {
+                _updatePortraitSwitch(details);
+                return;
+              }
+
               final double totalWidth = MediaQuery.sizeOf(context).width;
               final double tapPosition = details.localPosition.dx;
               final double sectionWidth = totalWidth / 3;
@@ -662,18 +785,29 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                 });
               }
             },
-            onVerticalDragEnd: (DragEndDetails details) {},
+            onVerticalDragEnd: (DragEndDetails details) {
+              _finishPortraitSwitch();
+            },
+            onVerticalDragCancel: _startPortraitSwitch,
           ),
         ),
 
-        /// 字幕层（支持点击单词查词，其余透明区域手势向下穿透）
-        Positioned.fill(
-          child: CaptionOverlay(
-            captions: _.realtimeCaptions,
-            preferences: _.captionPreferences,
-            playerController: _,
-          ),
-        ),
+        /// 字幕层：横屏全屏时显示在画面内；竖屏非全屏时不叠在画面上（移至播放器下方外置）
+        Obx(() {
+          final bool isFullScreen = _.isFullScreen.value;
+          final bool isLandscape =
+              MediaQuery.of(context).orientation == Orientation.landscape;
+          if (!isFullScreen && !isLandscape) {
+            return const SizedBox.shrink();
+          }
+          return Positioned.fill(
+            child: CaptionOverlay(
+              captions: _.realtimeCaptions,
+              preferences: _.captionPreferences,
+              playerController: _,
+            ),
+          );
+        }),
 
         // 头部、底部控制条
         Obx(

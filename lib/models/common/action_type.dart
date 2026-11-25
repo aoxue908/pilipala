@@ -11,9 +11,9 @@ enum ActionType {
   dislike,
   downloadCover,
   copyLink,
+  downloadVideo,
   // backgroundPlay,
   // listenVideo,
-  // downloadVideo,
 }
 
 extension ActionTypeExtension on ActionType {
@@ -26,6 +26,7 @@ extension ActionTypeExtension on ActionType {
         'dislike',
         'downloadCover',
         'copyLink',
+        'downloadVideo',
         // 'backgroundPlay',
         // 'listenVideo',
         // 'downloadVideo',
@@ -39,6 +40,7 @@ extension ActionTypeExtension on ActionType {
         '不喜欢',
         '下载封面',
         '复制链接',
+        '下载视频',
         // '后台播放',
         // '听视频',
         // '下载视频',
@@ -89,5 +91,10 @@ List<Map> actionMenuConfig = [
     'icon': const Icon(Icons.link_outlined),
     'label': '复制链接',
     'value': ActionType.copyLink,
+  },
+  {
+    'icon': const Icon(Icons.download_outlined),
+    'label': '下载视频',
+    'value': ActionType.downloadVideo,
   },
 ];

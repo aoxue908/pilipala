@@ -20,8 +20,23 @@ class _ActionMenuSetPageState extends State<ActionMenuSetPage> {
   @override
   void initState() {
     super.initState();
-    actionTypeSort = setting.get(SettingBoxKey.actionTypeSort,
-        defaultValue: ['like', 'coin', 'collect', 'watchLater', 'share']);
+    actionTypeSort = List<String>.from(setting.get(SettingBoxKey.actionTypeSort,
+        defaultValue: [
+          'like',
+          'coin',
+          'collect',
+          'watchLater',
+          'downloadVideo',
+          'share'
+        ]));
+    // 老用户升级：下载按钮默认出现在分享前面
+    if (!actionTypeSort.contains('downloadVideo')) {
+      final shareIndex = actionTypeSort.indexOf('share');
+      actionTypeSort.insert(
+        shareIndex >= 0 ? shareIndex : actionTypeSort.length,
+        'downloadVideo',
+      );
+    }
     allLabels = actionMenuConfig;
     allLabels.sort((a, b) {
       int indexA = actionTypeSort.indexOf((a['value'] as ActionType).value);

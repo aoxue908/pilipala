@@ -92,10 +92,15 @@ class PlayerPcm {
       throw const FormatException('当前播放器无法导出视频音轨');
     }
     if (_closed) return;
-    await decoder.open(
-      Media(source, httpHeaders: headers, start: start, end: end),
-      play: false,
-    );
+    try {
+      await decoder.open(
+        Media(source, httpHeaders: headers, start: start, end: end),
+        play: false,
+      ).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      _failed = true;
+      rethrow;
+    }
     if (!_closed) _paused = true;
   }
 
@@ -116,19 +121,23 @@ class PlayerPcm {
       return;
     }
 
-    // The decoder runs ahead of playback and keeps a generous buffer
-    // to avoid frequent pause/play cycles that cause mpv to freeze or drop HTTP connections.
+    // 卡顿优化：第二个 mpv 解码器每次 play/pause 切换都可能让主播放器掉帧。
+    // 把水位滞回区间从 15~60s 扩大到 12~90s，显著减少切换次数；
+    // 90s 的充足缓冲仍能覆盖网络抖动，且发送速率由 sendBudget 独立限速，
+    // 不会因多解码而拥塞云端识别队列。
+    const lowWaterSeconds = 12;
+    const highWaterSeconds = 90;
     final output = _output!;
     final length = await output.exists() ? await output.length() : 0;
     if (_closed) return;
     _fileLength = length;
     final ahead = length - (_dataOffset ?? 0) - limit;
     if (_paused) {
-      if (ahead < 15 * bytesPerSecond) {
+      if (ahead < lowWaterSeconds * bytesPerSecond) {
         _paused = false;
         await decoder.play();
       }
-    } else if (ahead > 60 * bytesPerSecond) {
+    } else if (ahead > highWaterSeconds * bytesPerSecond) {
       _paused = true;
       await decoder.pause();
     }
@@ -173,23 +182,54 @@ class PlayerPcm {
     return bytes;
   }
 
-  Future<void> close() async {
+  Future<void>? _closeFuture;
+
+  Future<void> close() {
+    // 幂等保护：close 可能被 _resetAsr 和 _run 的 finally 并发调用两次，
+    // 若不缓存，_decoder.dispose() 会双 dispose 第二个 mpv 实例导致原生崩溃。
+    return _closeFuture ??= _close();
+  }
+
+  Future<void> _close() async {
     _closed = true;
     try {
-      await _opening;
+      // 必须等 _open 完全结束再 dispose：_open 里 decoder.open 有 10s 超时，
+      // 若这里只等 2s 就 dispose，可能撞上一个正在 open 的 mpv 实例导致原生崩溃。
+      await _opening.timeout(const Duration(seconds: 15), onTimeout: () {});
     } catch (_) {
       // Initialization errors are handled by the caption session.
     }
     await _errors?.cancel();
+    final decoder = _decoder;
     try {
-      await _decoder?.dispose();
+      if (decoder != null) {
+        // 先 stop 让 mpv 退出解码/播放状态、事件循环自然收敛，再 dispose。
+        // 直接 dispose 一个仍在运行事件循环的 mpv，会与 media_kit 内部的
+        // mpv_terminate_destroy 延迟销毁交错，触发 mpv_wait_event 里对已销毁
+        // mutex 加锁 → SIGABRT（native 崩溃，无法被 Dart try/catch 捕获）。
+        try {
+          await decoder.stop().timeout(const Duration(seconds: 3), onTimeout: () {});
+        } catch (_) {
+        }
+        // 关键：不要给 dispose 加 2s 短超时。超时后继续删临时文件、上层立刻
+        // 新建第二个 mpv 实例，正是崩溃竞态的根源。给足时间让其同步释放完。
+        try {
+          await decoder.dispose().timeout(const Duration(seconds: 10));
+        } on TimeoutException {
+          // 极端情况下仍超时：放弃等待，但不要再触碰该 decoder 的资源。
+        }
+      }
+    } catch (_) {
     } finally {
       try {
         await _reader?.close();
+      } catch (_) {
       } finally {
-        final output = _output;
-        if (output != null && await output.exists()) await output.delete();
-        await _directory?.delete();
+        try {
+          final output = _output;
+          if (output != null && await output.exists()) await output.delete();
+          await _directory?.delete(recursive: true);
+        } catch (_) {}
       }
     }
   }

@@ -1,6 +1,5 @@
 // ignore_for_file: invalid_use_of_protected_member
 
-import 'package:easy_debounce/easy_throttle.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:pilipala/common/skeleton/media_bangumi.dart';
@@ -31,7 +30,8 @@ class _SearchPanelState extends State<SearchPanel>
     with AutomaticKeepAliveClientMixin {
   late SearchPanelController _searchPanelController;
 
-  late Future _futureBuilderFuture;
+  late final String _controllerTag;
+  late final VoidCallback _scrollListener;
   late ScrollController scrollController;
 
   @override
@@ -40,12 +40,13 @@ class _SearchPanelState extends State<SearchPanel>
   @override
   void initState() {
     super.initState();
+    _controllerTag = widget.tag ?? 'search-${identityHashCode(this)}';
     _searchPanelController = Get.put(
       SearchPanelController(
         keyword: widget.keyword,
         searchType: widget.searchType,
       ),
-      tag: widget.searchType!.type + widget.keyword!,
+      tag: _controllerTag,
     );
 
     /// 专栏默认排序
@@ -53,117 +54,92 @@ class _SearchPanelState extends State<SearchPanel>
       _searchPanelController.order.value = 'totalrank';
     }
     scrollController = _searchPanelController.scrollController;
-    scrollController.addListener(() async {
+    _scrollListener = () {
       if (scrollController.position.pixels >=
-          scrollController.position.maxScrollExtent - 100) {
-        EasyThrottle.throttle('history', const Duration(seconds: 1), () {
-          _searchPanelController.onSearch(type: 'onLoad');
-        });
+              scrollController.position.maxScrollExtent - 100 &&
+          _searchPanelController.errorMessage.value.isEmpty) {
+        _searchPanelController.onSearch(type: 'onLoad');
       }
-    });
-    _futureBuilderFuture = _searchPanelController.onSearch();
+    };
+    scrollController.addListener(_scrollListener);
+    _searchPanelController.onRefresh();
   }
 
   @override
   void dispose() {
-    scrollController.removeListener(() {});
+    scrollController.removeListener(_scrollListener);
+    final filterTag =
+        'search-filter-${identityHashCode(_searchPanelController)}';
+    Get.delete<VideoPanelController>(tag: filterTag);
+    Get.delete<ArticlePanelController>(tag: filterTag);
+    Get.delete<SearchPanelController>(tag: _controllerTag);
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final ctr = _searchPanelController;
     return RefreshIndicator(
       onRefresh: () async {
-        await _searchPanelController.onRefresh();
+        await ctr.onRefresh();
       },
-      child: FutureBuilder(
-        future: _futureBuilderFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.done) {
-            if (snapshot.data != null) {
-              Map data = snapshot.data;
-              var ctr = _searchPanelController;
-              RxList list = ctr.resultList;
-              if (data['status']) {
-                return Obx(() {
-                  switch (widget.searchType) {
-                    case SearchType.video:
-                      return SearchVideoPanel(
-                        ctr: _searchPanelController,
-                        list: list.value,
-                      );
-                    case SearchType.media_bangumi:
-                      return searchMbangumiPanel(context, ctr, list);
-                    case SearchType.bili_user:
-                      return searchUserPanel(context, ctr, list);
-                    case SearchType.live_room:
-                      return searchLivePanel(context, ctr, list);
-                    case SearchType.article:
-                      return SearchArticlePanel(
-                        ctr: _searchPanelController,
-                        list: list.value,
-                      );
-                    default:
-                      return const SizedBox();
-                  }
-                });
-              } else {
-                return CustomScrollView(
-                  physics: const NeverScrollableScrollPhysics(),
-                  slivers: [
-                    HttpError(
-                      errMsg: data['msg'],
-                      fn: () {
-                        setState(() {
-                          _futureBuilderFuture =
-                              _searchPanelController.onSearch();
-                        });
-                      },
-                    ),
-                  ],
-                );
-              }
-            } else {
-              return CustomScrollView(
-                physics: const NeverScrollableScrollPhysics(),
-                slivers: [
-                  HttpError(
-                    errMsg: '没有相关数据',
-                    fn: () {
-                      setState(() {
-                        _futureBuilderFuture =
-                            _searchPanelController.onSearch();
-                      });
-                    },
-                  ),
-                ],
-              );
-            }
-          } else {
-            // 骨架屏
-            return ListView.builder(
-              addAutomaticKeepAlives: false,
-              addRepaintBoundaries: false,
-              itemCount: 15,
-              itemBuilder: (context, index) {
-                switch (widget.searchType) {
-                  case SearchType.video:
-                    return const VideoCardHSkeleton();
-                  case SearchType.media_bangumi:
-                    return const MediaBangumiSkeleton();
-                  case SearchType.bili_user:
-                    return const VideoCardHSkeleton();
-                  case SearchType.live_room:
-                    return const VideoCardHSkeleton();
-                  default:
-                    return const VideoCardHSkeleton();
-                }
-              },
-            );
-          }
-        },
-      ),
+      child: Obx(() {
+        final list = ctr.resultList;
+        final loading = ctr.isLoading.value;
+        final error = ctr.errorMessage.value;
+        if (list.isEmpty && loading) {
+          return ListView.builder(
+              itemCount: 10,
+              itemBuilder: (context, index) =>
+                  widget.searchType == SearchType.media_bangumi
+                      ? const MediaBangumiSkeleton()
+                      : const VideoCardHSkeleton());
+        }
+        if (list.isEmpty &&
+            error.isNotEmpty &&
+            widget.searchType != SearchType.video) {
+          return CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [HttpError(errMsg: error, fn: () => ctr.onRefresh())],
+          );
+        }
+        Widget panel;
+        switch (widget.searchType) {
+          case SearchType.video:
+            panel = SearchVideoPanel(ctr: ctr, list: list.toList());
+            break;
+          case SearchType.media_bangumi:
+            panel = searchMbangumiPanel(context, ctr, list);
+            break;
+          case SearchType.bili_user:
+            panel = searchUserPanel(context, ctr, list);
+            break;
+          case SearchType.live_room:
+            panel = searchLivePanel(context, ctr, list);
+            break;
+          case SearchType.article:
+            panel = SearchArticlePanel(ctr: ctr, list: list.toList());
+            break;
+          default:
+            return const SizedBox();
+        }
+        if (list.isNotEmpty && error.isNotEmpty) {
+          return Column(children: [
+            Row(children: [
+              Expanded(child: Text(error)),
+              TextButton(
+                  onPressed: () => ctr.onRefresh(), child: const Text('重试')),
+              if (ctr.requiresVerification.value)
+                TextButton(
+                    onPressed: ctr.openOfficialSearch,
+                    child: const Text('官方搜索'))
+            ]),
+            Expanded(child: panel),
+          ]);
+        }
+        return panel;
+      }),
     );
   }
 }

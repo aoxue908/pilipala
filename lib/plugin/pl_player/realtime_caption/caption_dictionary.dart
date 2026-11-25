@@ -51,7 +51,7 @@ class WordLookupResult {
     this.examples = const [],
     this.contextSentence,
     this.contextTranslation,
-    this.sourceLanguage = 'en',
+    this.sourceLanguage = 'auto',
     this.rawTranslation,
   });
 
@@ -235,7 +235,7 @@ class WordAudioPlayer {
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': url.contains('youdao')
                 ? 'https://dict.youdao.com/'
-                : 'https://translate.googleapis.com/',
+                : 'https://google.qianche.dpdns.org/',
           },
         ),
       );
@@ -289,16 +289,23 @@ class CaptionDictionary {
       );
     }
 
+    final hasChinese = RegExp(r'[\u4E00-\u9FFF]').hasMatch(query);
     var lang = forcedLanguage ?? CaptionPronunciation.detectLanguage(query);
+    // 若外部传入 forcedLanguage 是 zh-CN 或 yue，但查询文本完全没有中文汉字，不应盲信 zh-CN
+    if (!hasChinese && (lang == 'zh-CN' || lang == 'yue')) {
+      final detected = CaptionPronunciation.detectLanguage(query);
+      lang = detected != 'zh-CN' && detected != 'yue' ? detected : 'auto';
+    }
     // 若单词为中文，但上下文句子为粤语，或外部标记为粤语，或属于离线粤语词库，则识别为粤语
-    if (forcedLanguage == null && (lang == 'zh-CN' || lang == 'auto')) {
+    if (hasChinese && (lang == 'zh-CN' || lang == 'auto')) {
       if (isCantonese == true ||
+          forcedLanguage == 'yue' ||
           CaptionOfflineDictionary.isCantoneseWord(query) ||
           (contextSentence != null &&
               CaptionPronunciation.isCantoneseText(contextSentence))) {
         lang = 'yue';
       }
-    } else if (forcedLanguage != null) {
+    } else if (forcedLanguage != null && (!forcedLanguage.startsWith('zh') || hasChinese)) {
       lang = forcedLanguage;
     }
 
@@ -328,7 +335,7 @@ class CaptionDictionary {
     }
 
     // 0. 优先匹配本地离线词典库（0ms 极速响应，无需等待网络）
-    final offlineResult = CaptionOfflineDictionary.shared.lookup(
+    final offlineResult = lang == 'ja' ? null : CaptionOfflineDictionary.shared.lookup(
       query,
       contextSentence: contextSentence,
       contextTranslation: contextTranslation,
@@ -522,11 +529,11 @@ class CaptionDictionary {
     }
 
     if (lang == 'ja') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=${Uri.encodeComponent(query)}';
     } else if (lang == 'ko') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(query)}';
     } else if (lang == 'yue') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}';
       if (data['baike'] is Map && data['baike']['summarys'] is List) {
         for (final item in (data['baike']['summarys'] as List)) {
           if (item is Map && item['summary'] != null) {
@@ -571,25 +578,44 @@ class CaptionDictionary {
     String? contextTranslation,
   }) async {
     final isYue = lang == 'yue';
-    final response = await _dio.get<String>(
+    dynamic data;
+    const endpoints = [
       'https://translate.googleapis.com/translate_a/single',
-      queryParameters: {
-        'client': 'gtx',
-        'sl': isYue ? 'yue' : 'auto',
-        'tl': 'zh-CN',
-        'dt': ['t', 'bd', 'rm', 'ex', 'md', 'ss'],
-        'q': query,
-      },
-      options: Options(
-        responseType: ResponseType.plain,
-        headers: {
-          'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-      ),
-    );
+      'https://translate.google.com/translate_a/single',
+      'https://google.qianche.dpdns.org/translate_a/single',
+    ];
 
-    final dynamic data = jsonDecode(response.data ?? '');
+    for (final ep in endpoints) {
+      try {
+        final response = await _dio.get<String>(
+          ep,
+          queryParameters: {
+            'client': 'gtx',
+            'sl': isYue ? 'yue' : 'auto',
+            'tl': 'zh-CN',
+            'dt': ['t', 'bd', 'rm', 'ex', 'md', 'ss'],
+            'q': query,
+          },
+          options: Options(
+            responseType: ResponseType.plain,
+            sendTimeout: const Duration(seconds: 3),
+            receiveTimeout: const Duration(seconds: 3),
+            headers: {
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+          ),
+        );
+        final dynamic parsed = jsonDecode(response.data ?? '');
+        if (parsed is List && parsed.isNotEmpty) {
+          data = parsed;
+          break;
+        }
+      } catch (_) {
+        // Fallback to next endpoint
+      }
+    }
+
     if (data is! List || data.isEmpty) return null;
 
     final detectedLang = (data.length > 2 && data[2] is String && (data[2] as String).isNotEmpty)
@@ -689,17 +715,17 @@ class CaptionDictionary {
         : null;
     final String audioUrl;
     if (effectiveLang == 'yue') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}';
     } else if (effectiveLang == 'en') {
       audioUrl = usAudioUrl!;
     } else if (effectiveLang == 'ja') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=${Uri.encodeComponent(query)}';
     } else if (effectiveLang == 'ko') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(query)}';
     } else if (effectiveLang == 'zh-CN') {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=${Uri.encodeComponent(query)}';
     } else {
-      audioUrl = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${Uri.encodeComponent(effectiveLang)}&q=${Uri.encodeComponent(query)}';
+      audioUrl = 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=${Uri.encodeComponent(effectiveLang)}&q=${Uri.encodeComponent(query)}';
     }
 
     return WordLookupResult(
@@ -723,23 +749,34 @@ class CaptionDictionary {
   WordLookupResult _mergeResults(WordLookupResult? a, WordLookupResult b) {
     if (a == null) return b;
     final isYue = (a.sourceLanguage == 'yue' || b.sourceLanguage == 'yue');
-    final effectiveLang = isYue
-        ? 'yue'
-        : ((a.sourceLanguage != 'zh-CN' && a.sourceLanguage != 'auto')
-            ? a.sourceLanguage
-            : b.sourceLanguage);
+    final hasChinese = RegExp(r'[\u4E00-\u9FFF]').hasMatch(a.query);
+
+    final String effectiveLang;
+    if (isYue) {
+      effectiveLang = 'yue';
+    } else if (b.sourceLanguage.isNotEmpty && b.sourceLanguage != 'auto') {
+      if (a.sourceLanguage == 'auto' || (!hasChinese && a.sourceLanguage == 'zh-CN')) {
+        effectiveLang = b.sourceLanguage;
+      } else {
+        effectiveLang = a.sourceLanguage;
+      }
+    } else {
+      effectiveLang = a.sourceLanguage;
+    }
+
+    final isEnglish = effectiveLang == 'en' || effectiveLang.startsWith('en-');
     final mergedAudioUrl = isYue
-        ? 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(a.query)}'
+        ? 'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(a.query)}'
         : (a.audioUrl ?? b.audioUrl);
 
     return WordLookupResult(
       query: a.query,
       phonetic: a.phonetic ?? b.phonetic,
-      ukPhonetic: a.ukPhonetic ?? b.ukPhonetic ?? a.phonetic ?? b.phonetic,
-      usPhonetic: a.usPhonetic ?? b.usPhonetic ?? a.phonetic ?? b.phonetic,
+      ukPhonetic: isEnglish ? (a.ukPhonetic ?? b.ukPhonetic) : null,
+      usPhonetic: isEnglish ? (a.usPhonetic ?? b.usPhonetic) : null,
       audioUrl: mergedAudioUrl,
-      ukAudioUrl: a.ukAudioUrl ?? b.ukAudioUrl,
-      usAudioUrl: a.usAudioUrl ?? b.usAudioUrl,
+      ukAudioUrl: isEnglish ? (a.ukAudioUrl ?? b.ukAudioUrl) : null,
+      usAudioUrl: isEnglish ? (a.usAudioUrl ?? b.usAudioUrl) : null,
       definitions: a.definitions.isNotEmpty ? a.definitions : b.definitions,
       examples: a.examples.isNotEmpty ? a.examples : b.examples,
       contextSentence: a.contextSentence ?? b.contextSentence,

@@ -46,7 +46,9 @@ class CaptionTimeline {
   final List<CaptionCue> _cues;
   final _endThrough = <int>[];
 
+  List<CaptionCue> get cues => _cues;
   bool get isEmpty => _cues.isEmpty;
+  bool get isNotEmpty => _cues.isNotEmpty;
   int? get endMs => _endThrough.isEmpty ? null : _endThrough.last;
 
   int _firstAfter(int positionMs) {
@@ -71,6 +73,21 @@ class CaptionTimeline {
       if (cue.endMs > positionMs) active = cue;
     }
     return active;
+  }
+
+  /// 实时 ASR 专用取帧：结果经网络往返后到达时，它携带的音频时间戳
+  /// 对应的播放时刻往往已经过去，严格按 [at] 匹配会被当成"过期 cue"丢掉，
+  /// 表现为声音已经出来、字幕却迟迟不出现（且缓存队列也不更新）。
+  ///
+  /// 仅当"所有 cue 都已过期"时才回退到最后一个 cue；若存在尚未开始的 cue
+  /// （startMs > positionMs）则保持返回 null，避免字幕提前于声音出现。
+  CaptionCue? atOrLatest(int positionMs) {
+    final active = at(positionMs);
+    if (active != null) return active;
+    if (_cues.isEmpty) return null;
+    final last = _cues.last;
+    if (last.startMs > positionMs) return null;
+    return last;
   }
 
   Iterable<CaptionCue> upcoming(int positionMs, int throughMs) sync* {
@@ -99,8 +116,8 @@ class CaptionTimeline {
       }
       final trimmed = text.trim();
       if (trimmed.isEmpty) continue;
-      // 超长单句（>50字符）保留拆分能力，常规长度字幕保持原始精确时间戳，避免因标点分句导致后半句人为推迟
-      if (trimmed.length > 50) {
+      // 超长单句（>=35字符）保留拆分能力，常规长度字幕保持原始精确时间戳，避免因标点分句导致后半句人为推迟
+      if (trimmed.length >= 35) {
         cues.addAll(buildCaptionCues(
           trimmed,
           startMs: (from * 1000).round(),
@@ -121,6 +138,44 @@ class CaptionTimeline {
       }
     }
     return CaptionTimeline(cues);
+  }
+}
+
+/// ASR may deliver several already-due cues in one response. Present them in
+/// order instead of discarding everything before the last active cue.
+class CaptionCueDelivery {
+  // Keep a monotonic cursor for the whole playback session. A sliding set of
+  // timestamps forgets old cues before the timeline necessarily removes them
+  // (especially retained partial results), causing endless replay.
+  int? _lastDeliveredStartMs;
+  CaptionCue? _current;
+  int? _shownAtMs;
+
+  void clear() {
+    _lastDeliveredStartMs = null;
+    _current = null;
+    _shownAtMs = null;
+  }
+
+  CaptionCue? take(CaptionTimeline timeline,
+      {required int positionMs, required int nowMs, bool paused = false}) {
+    final due = timeline.cues.where((cue) => cue.startMs <= positionMs);
+    // A revision of the displayed cue can be shown immediately. Revisions of
+    // older, already displayed cues must not replay the transcript.
+    for (final cue in due) {
+      if (cue.startMs == _lastDeliveredStartMs) _current = cue;
+    }
+    if (paused && _current != null) return _current;
+    if (_shownAtMs != null && nowMs - _shownAtMs! < 650) return _current;
+    for (final cue in due) {
+      if (_lastDeliveredStartMs != null &&
+          cue.startMs <= _lastDeliveredStartMs!) continue;
+      _lastDeliveredStartMs = cue.startMs;
+      _current = cue;
+      _shownAtMs = nowMs;
+      return cue;
+    }
+    return _current;
   }
 }
 
@@ -152,10 +207,12 @@ class AsrCaptionTiming {
   }) {
     final processedMs =
         _originMs + math.min<int>(caption.audioMs ?? sentMs, sentMs);
-    if (_utterance != caption.utterance) {
+    final bool isNewUtterance = _utterance != caption.utterance;
+    final bool isFinalSplit = caption.isFinal && (_lastOffset > caption.text.length || caption.startAudioMs != null);
+    if (isNewUtterance || isFinalSplit) {
       if (caption.startAudioMs != null) {
         _startMs = _originMs + caption.startAudioMs!;
-      } else {
+      } else if (isNewUtterance) {
         final earliest = math.max(_previousEndMs, processedMs - 3 * chunkMs);
         _startMs = speech.firstSpeech(earliest, processedMs) ?? earliest;
       }
@@ -164,11 +221,24 @@ class AsrCaptionTiming {
       _lastOffset = caption.text.length;
       _anchors.clear();
     }
-    if (caption.text.length > _lastOffset) {
+    if (caption.text.length > _lastOffset || caption.isFinal) {
       final endMs = speech.lastSpeech(_endMs, processedMs) ?? processedMs;
       _endMs = math.max(_endMs, math.max(endMs, _startMs + 1));
       _lastOffset = caption.text.length;
       _anchors.add((offset: _lastOffset, audioMs: _endMs));
+    }
+    // 有真实词时间时直接采用，不再按文本长度或语音能量重分配。
+    final words = caption.words.isNotEmpty &&
+            caption.words.every((word) => word.endMs <= sentMs)
+        ? [
+            for (final word in caption.words)
+              AsrWordTiming(word.text, _originMs + word.startMs,
+                  _originMs + word.endMs, word.startOffset, word.endOffset),
+          ]
+        : <AsrWordTiming>[];
+    if (words.isNotEmpty) {
+      _startMs = words.first.startMs;
+      _endMs = words.last.endMs;
     }
     if (caption.isFinal) {
       _previousEndMs = _endMs;
@@ -180,6 +250,7 @@ class AsrCaptionTiming {
       isFinal: caption.isFinal,
       anchors: _anchors,
       speech: speech,
+      words: words,
       lingerMs: 1100,
     );
   }
@@ -260,6 +331,13 @@ class CaptionSpeech {
     return null;
   }
 
+  /// 只计算实际有声区间，不把服务未回报的静音计作识别积压。
+  int activeDuration(int startMs, int endMs) {
+    if (endMs <= startMs) return 0;
+    return _within(startMs, endMs)
+        .fold(0, (total, range) => total + range.endMs - range.startMs);
+  }
+
   int Function(double) _interpolator(int startMs, int endMs) {
     final ranges = _within(startMs, endMs).toList(growable: false);
     final length =
@@ -314,6 +392,7 @@ List<CaptionCue> buildCaptionCues(
   required bool isFinal,
   List<CaptionAnchor> anchors = const [],
   CaptionSpeech? speech,
+  List<AsrWordTiming> words = const [],
   int lingerMs = 500,
 }) {
   if (text.trim().isEmpty || spokenEndMs <= startMs) return const [];
@@ -389,14 +468,24 @@ List<CaptionCue> buildCaptionCues(
     final start = glyphs[first].start;
     final end = glyphs[last - 1].end;
     final line = text.substring(start, end);
-    final lineStart = timeAt(weights[start].toDouble());
-    final lineEnd = timeAt(weights[end].toDouble(), afterPause: false);
+    final lineWords = words.where((word) =>
+        word.startOffset < end && word.endOffset > start).toList();
+    final lineStart = lineWords.isEmpty
+        ? timeAt(weights[start].toDouble())
+        : lineWords.first.timeAt(start.toDouble());
+    final lineEnd = lineWords.isEmpty
+        ? timeAt(weights[end].toDouble(), afterPause: false)
+        : lineWords.last.timeAt(end.toDouble());
     final marks = <CaptionAnchor>[];
     for (var i = first; i < last; i++) {
       final glyph = glyphs[i];
       if (!glyph.spoken) continue;
       // Start coloring a grapheme near its estimated spoken onset.
-      final audioMs = timeAt(weights[glyph.start] + glyph.weight * 0.3);
+      final matchingWords = lineWords.where((word) =>
+          word.startOffset <= glyph.start && word.endOffset > glyph.start);
+      final audioMs = matchingWords.isEmpty
+          ? timeAt(weights[glyph.start] + glyph.weight * 0.3)
+          : matchingWords.first.timeAt(glyph.start + glyph.text.length * 0.3);
       marks.add((offset: glyph.end - start, audioMs: audioMs));
     }
     if (timed) marks.add((offset: line.length, audioMs: lineEnd));

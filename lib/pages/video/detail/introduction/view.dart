@@ -16,6 +16,8 @@ import 'package:pilipala/common/widgets/stat/view.dart';
 import 'package:pilipala/models/video_detail_res.dart';
 import 'package:pilipala/pages/video/detail/introduction/controller.dart';
 import 'package:pilipala/pages/video/detail/widgets/ai_detail.dart';
+import 'package:pilipala/pages/video/detail/widgets/video_download_sheet.dart';
+import 'package:pilipala/models/video/play/url.dart';
 import 'package:pilipala/utils/feed_back.dart';
 import 'package:pilipala/utils/global_data_cache.dart';
 import 'package:pilipala/utils/storage.dart';
@@ -588,6 +590,32 @@ class _VideoInfoState extends State<VideoInfo> with TickerProviderStateMixin {
         onTap: () => videoIntroController.actionShareVideo(),
         selectStatus: false,
         text: '分享',
+      ),
+      'downloadVideo': ActionItem(
+        icon: const Icon(Icons.download_outlined),
+        onTap: () {
+          PlayUrlModel? playUrl;
+          try {
+            playUrl = videoDetailCtr.data;
+          } catch (_) {
+            // playurl 尚未加载完成时 data 还是 late 变量
+          }
+          if (playUrl == null) {
+            SmartDialog.showToast('视频信息加载中，请稍后再试');
+            return;
+          }
+          showVideoDownloadSheet(
+            context: context,
+            playUrl: playUrl,
+            title: widget.videoDetail?.title ?? widget.bvid,
+            bvid: widget.videoDetail?.bvid ?? widget.bvid,
+            cid: widget.videoDetail?.cid ?? videoDetailCtr.cid.value,
+            pic: widget.videoDetail?.pic ?? '',
+            durationSeconds: widget.videoDetail?.duration ?? 0,
+          );
+        },
+        selectStatus: false,
+        text: '下载',
       ),
       'dislike': Obx(
         () => ActionItem(

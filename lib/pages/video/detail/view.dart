@@ -32,6 +32,7 @@ import '../../../plugin/pl_player/models/bottom_control_type.dart';
 import '../../../services/shutdown_timer_service.dart';
 import 'widgets/app_bar.dart';
 import 'widgets/header_control.dart';
+import '../../../plugin/pl_player/realtime_caption/caption_overlay.dart';
 
 class VideoDetailPage extends StatefulWidget {
   const VideoDetailPage({Key? key}) : super(key: key);
@@ -59,7 +60,9 @@ class _VideoDetailPageState extends State<VideoDetailPage>
   final Box<dynamic> setting = GStrorage.setting;
   late double statusBarHeight;
   final double videoHeight = Get.size.width * 9 / 16;
-  late Future _futureBuilderFuture;
+  // 可空：本地播放时播放器初始化是异步的，首帧 build 可能早于赋值，
+  // 若用 late 会直接抛 LateInitializationError（红屏崩溃）。
+  Future? _futureBuilderFuture;
   // 自动退出全屏
   late bool autoExitFullcreen;
   late bool autoPlayEnable;
@@ -104,13 +107,14 @@ class _VideoDetailPageState extends State<VideoDetailPage>
             bangumiIntroController.bangumiDetail.value, p0);
       });
     }
-    statusBarHeight = localCache.get('statusBarHeight');
+    statusBarHeight = localCache.get('statusBarHeight') ?? 0.0;
     autoExitFullcreen =
         setting.get(SettingBoxKey.enableAutoExit, defaultValue: false);
     autoPlayEnable =
         setting.get(SettingBoxKey.autoPlayEnable, defaultValue: true);
     autoPiP = setting.get(SettingBoxKey.autoPiP, defaultValue: false);
 
+    plPlayerController = vdCtr.plPlayerController;
     videoSourceInit();
     appbarStreamListen();
     fullScreenStatusListener();
@@ -123,7 +127,24 @@ class _VideoDetailPageState extends State<VideoDetailPage>
 
   // 获取视频资源，初始化播放器
   Future<void> videoSourceInit() async {
-    _futureBuilderFuture = vdCtr.queryVideoUrl();
+    // 先同步给 FutureBuilder 一个占位 Future，避免首帧 build 时
+    // 读取尚未赋值的字段（本地播放要先 await 播放器初始化，耗时更长，必现崩溃）。
+    final resultCompleter = Completer<Map<String, dynamic>>();
+    _futureBuilderFuture = resultCompleter.future;
+    if (vdCtr.isLocalPlayback) {
+      // 离线缓存：直接播本地文件，跳过网络取流。
+      final args = Get.arguments;
+      await vdCtr.playerInitLocal(
+        title: args['title']?.toString(),
+        pic: args['pic']?.toString(),
+        duration: args['durationMs'] is int
+            ? Duration(milliseconds: args['durationMs'] as int)
+            : null,
+      );
+      resultCompleter.complete(<String, dynamic>{'status': true});
+    } else {
+      _futureBuilderFuture = vdCtr.queryVideoUrl();
+    }
     if (vdCtr.autoPlay.value) {
       plPlayerController = vdCtr.plPlayerController;
       plPlayerController!.addStatusLister(playerListener);
@@ -154,9 +175,14 @@ class _VideoDetailPageState extends State<VideoDetailPage>
       }
       shutdownTimerService.handleWaitingFinished();
 
-      /// 顺序播放 列表循环
-      if (plPlayerController!.playRepeat != PlayRepeat.pause &&
-          plPlayerController!.playRepeat != PlayRepeat.singleCycle) {
+      /// 顺序播放 列表循环，或开启了自动播放（且非单集循环、非播完暂停）
+      final bool shouldPlayNext = plPlayerController!.playRepeat == PlayRepeat.listOrder ||
+          plPlayerController!.playRepeat == PlayRepeat.listCycle ||
+          (autoPlayEnable &&
+              plPlayerController!.playRepeat != PlayRepeat.singleCycle &&
+              plPlayerController!.playRepeat != PlayRepeat.pause);
+
+      if (shouldPlayNext) {
         if (vdCtr.videoType == SearchType.video) {
           videoIntroController.nextPlay();
         }
@@ -204,6 +230,9 @@ class _VideoDetailPageState extends State<VideoDetailPage>
 
   void fullScreenStatusListener() {
     plPlayerController?.isFullScreen.listen((bool isFullScreen) {
+      if (mounted) {
+        setState(() {});
+      }
       if (isFullScreen) {
         vdCtr.hiddenReplyReplyPanel();
         if (vdCtr.videoType == SearchType.video) {
@@ -242,7 +271,15 @@ class _VideoDetailPageState extends State<VideoDetailPage>
   }
 
   getStatusHeight() async {
-    statusHeight = await StatusBarControl.getHeight;
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        statusHeight = await StatusBarControl.getHeight;
+      } else {
+        statusHeight = 0;
+      }
+    } catch (_) {
+      statusHeight = 0;
+    }
   }
 
   @override
@@ -514,27 +551,32 @@ class _VideoDetailPageState extends State<VideoDetailPage>
     final _context = MediaQuery.of(context);
     final bool isDesktop = !Platform.isAndroid && !Platform.isIOS;
     // 桌面端默认高度限制在视口 52% 左右，留出下方空间给合集选集和评论；移动端按 16:9
-    late double defaultVideoHeight = isDesktop
+    final double defaultVideoHeight = isDesktop
         ? math.min(sizeContext.height * 0.52, sizeContext.width * 9 / 16)
         : sizeContext.width * 9 / 16;
-    late RxDouble videoHeight = defaultVideoHeight.obs;
-    final double pinnedHeaderHeight =
-        statusBarHeight + kToolbarHeight + videoHeight.value;
-    // ignore: no_leading_underscores_for_local_identifiers
 
     // 竖屏
     final bool isPortrait = _context.orientation == Orientation.portrait;
     // 横屏：移动端横屏自动进入全屏；桌面端横屏是正常窗口比例，不能误判为全屏
     final bool isLandscape =
         !isDesktop && _context.orientation == Orientation.landscape;
-    final Rx<bool> isFullScreen = plPlayerController?.isFullScreen ?? false.obs;
-    // 全屏时高度撑满
-    if (isLandscape || isFullScreen.value == true) {
-      videoHeight.value = Get.size.height;
-      enterFullScreen();
-    } else {
-      videoHeight.value = defaultVideoHeight;
-      exitFullScreen();
+    final bool isFullScreen = plPlayerController?.isFullScreen.value == true;
+    final bool isVerticalFullScreen =
+        isFullScreen && plPlayerController?.isVerticalFullScreen.value == true;
+    final double currentVideoHeight = (isLandscape || isFullScreen)
+        ? (isLandscape || isVerticalFullScreen
+            ? sizeContext.height
+            : sizeContext.height - MediaQuery.of(context).padding.top)
+        : defaultVideoHeight;
+    final double pinnedHeaderHeight =
+        statusBarHeight + kToolbarHeight + currentVideoHeight;
+
+    if (!isDesktop) {
+      if (isLandscape || isFullScreen) {
+        enterFullScreen();
+      } else {
+        exitFullScreen();
+      }
     }
 
     Widget buildLoadingWidget() {
@@ -557,34 +599,41 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                   ? videoIntroController.showEposideHandler()
                   : bangumiIntroController.showEposideHandler(),
               fullScreenCb: (bool status) {
-                videoHeight.value =
-                    status ? Get.size.height : defaultVideoHeight;
+                if (mounted) {
+                  setState(() {});
+                }
               },
+              swipeNextCb: () => videoIntroController.playAdjacentVideo(true),
+              swipePreviousCb: () =>
+                  videoIntroController.playAdjacentVideo(false),
             ));
     }
 
     Widget buildErrorWidget(dynamic error) {
-      return Obx(
-        () => SizedBox(
-          height: videoHeight.value,
-          width: Get.size.width,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Text('加载失败', style: TextStyle(color: Colors.white)),
-              Text('$error', style: const TextStyle(color: Colors.white)),
-              const SizedBox(height: 10),
-              IconButton.filled(
-                onPressed: () {
-                  setState(() {
+      return SizedBox(
+        height: currentVideoHeight,
+        width: Get.size.width,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const Text('加载失败', style: TextStyle(color: Colors.white)),
+            Text('$error', style: const TextStyle(color: Colors.white)),
+            const SizedBox(height: 10),
+            IconButton.filled(
+              onPressed: () {
+                setState(() {
+                  // 离线缓存刷新应重新初始化本地播放，而不是去请求网络取流。
+                  if (vdCtr.isLocalPlayback) {
+                    videoSourceInit();
+                  } else {
                     _futureBuilderFuture = vdCtr.queryVideoUrl();
-                  });
-                },
-                icon: const Icon(Icons.refresh),
-              )
-            ],
-          ),
+                  }
+                });
+              },
+              icon: const Icon(Icons.refresh),
+            )
+          ],
         ),
       );
     }
@@ -594,7 +643,8 @@ class _VideoDetailPageState extends State<VideoDetailPage>
       return FutureBuilder(
         future: _futureBuilderFuture,
         builder: (BuildContext context, AsyncSnapshot snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          if (_futureBuilderFuture == null ||
+              snapshot.connectionState == ConnectionState.waiting) {
             return buildLoadingWidget();
           } else if (snapshot.connectionState == ConnectionState.done) {
             if (snapshot.hasData && snapshot.data['status']) {
@@ -655,16 +705,20 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                           plPlayerController?.isFullScreen.value == true;
                       final bool isLandscape =
                           !isDesktop && orientation == Orientation.landscape;
+                      final bool isVerticalFullScreen = isFullScreen &&
+                          plPlayerController?.isVerticalFullScreen.value == true;
                       final double expandedHeight = isLandscape || isFullScreen
-                          ? (MediaQuery.sizeOf(context).height -
-                              (isLandscape
-                                  ? 0
-                                  : MediaQuery.of(context).padding.top))
-                          : videoHeight.value;
-                      if (isLandscape || isFullScreen) {
-                        enterFullScreen();
-                      } else {
-                        exitFullScreen();
+                          ? (isLandscape || isVerticalFullScreen
+                              ? MediaQuery.sizeOf(context).height
+                              : MediaQuery.sizeOf(context).height -
+                                  MediaQuery.of(context).padding.top)
+                          : defaultVideoHeight;
+                      if (!isDesktop) {
+                        if (isLandscape || isFullScreen) {
+                          enterFullScreen();
+                        } else {
+                          exitFullScreen();
+                        }
                       }
                       return SliverAppBar(
                         automaticallyImplyLeading: false,
@@ -703,6 +757,33 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                                             : const SizedBox(),
                                       ),
 
+                                      /// 字幕控制层：竖屏非全屏时，六颗图标分居画面左右两侧，
+                                      /// 触碰边缘召唤、停留后自动缩回屏幕外（带动画）。
+                                      /// 全屏/横屏时由播放器内部的 CaptionOverlay 负责，避免重复。
+                                      Obx(
+                                        () {
+                                          final player = plPlayerController;
+                                          if (player == null ||
+                                              !isShowing.value ||
+                                              !player.realtimeCaptions.enabled ||
+                                              player.isFullScreen.value ||
+                                              MediaQuery.of(context)
+                                                      .orientation ==
+                                                  Orientation.landscape) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return Positioned.fill(
+                                            child: CaptionOverlay(
+                                              captions: player.realtimeCaptions,
+                                              preferences:
+                                                  player.captionPreferences,
+                                              playerController: player,
+                                              controlsOnly: true,
+                                            ),
+                                          );
+                                        },
+                                      ),
+
                                       /// 关闭自动播放时 手动播放
                                       Obx(
                                         () => Visibility(
@@ -735,16 +816,44 @@ class _VideoDetailPageState extends State<VideoDetailPage>
                 final bool isLandscape = !isDesktop &&
                     MediaQuery.of(context).orientation ==
                         Orientation.landscape;
-                return isLandscape ||
-                        plPlayerController?.isFullScreen.value == true
-                    ? MediaQuery.sizeOf(context).height
-                    : playerStatus.value != PlayerStatus.playing
-                        ? kToolbarHeight
-                        : pinnedHeaderHeight;
+                final bool isFullScreen =
+                    plPlayerController?.isFullScreen.value == true;
+                if (isLandscape || isFullScreen) {
+                  return MediaQuery.sizeOf(context).height;
+                }
+                if (isDesktop) {
+                  return defaultVideoHeight;
+                }
+                return playerStatus.value != PlayerStatus.playing
+                    ? kToolbarHeight
+                    : pinnedHeaderHeight;
               },
               onlyOneScrollInBody: true,
               body: Column(
                 children: [
+                  Obx(() {
+                    final player = plPlayerController;
+                    if (player == null || !player.realtimeCaptions.enabled) {
+                      return const SizedBox.shrink();
+                    }
+                    final bool isFullScreen = player.isFullScreen.value;
+                    final bool isLandscape =
+                        MediaQuery.of(context).orientation == Orientation.landscape;
+                    if (isFullScreen || isLandscape) {
+                      return const SizedBox.shrink();
+                    }
+                    return Container(
+                      width: double.infinity,
+                      color: Theme.of(context).colorScheme.surface,
+                      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                      child: CaptionOverlay(
+                        captions: player.realtimeCaptions,
+                        preferences: player.captionPreferences,
+                        playerController: player,
+                        isInline: true,
+                      ),
+                    );
+                  }),
                   tabbarBuild(),
                   Expanded(
                     child: TabBarView(
@@ -866,6 +975,25 @@ class _VideoDetailPageState extends State<VideoDetailPage>
         ],
       ),
     );
+
+    if (isDesktop) {
+      childWhenDisabled = CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (plPlayerController?.isFullScreen.value == true) {
+              plPlayerController?.triggerFullScreen(status: false);
+            }
+          },
+          const SingleActivator(LogicalKeyboardKey.f11): () {
+            plPlayerController?.toggleNativeFullScreen();
+          },
+        },
+        child: Focus(
+          autofocus: true,
+          child: childWhenDisabled,
+        ),
+      );
+    }
 
     if (Platform.isAndroid) {
       return PiPSwitcher(

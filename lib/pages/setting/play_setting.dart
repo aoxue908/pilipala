@@ -8,6 +8,7 @@ import 'package:pilipala/models/video/play/ao_output.dart';
 import 'package:pilipala/models/video/play/quality.dart';
 import 'package:pilipala/pages/setting/widgets/select_dialog.dart';
 import 'package:pilipala/plugin/pl_player/index.dart';
+import 'package:pilipala/plugin/pl_player/models/play_repeat.dart';
 import 'package:pilipala/services/service_locator.dart';
 import 'package:pilipala/utils/global_data_cache.dart';
 import 'package:pilipala/utils/storage.dart';
@@ -24,6 +25,7 @@ class PlaySetting extends StatefulWidget {
 
 class _PlaySettingState extends State<PlaySetting> {
   Box setting = GStrorage.setting;
+  Box videoStorage = GStrorage.video;
   late dynamic defaultVideoQa;
   late dynamic defaultLiveQa;
   late dynamic defaultAudioQa;
@@ -31,6 +33,7 @@ class _PlaySettingState extends State<PlaySetting> {
   late int defaultFullScreenMode;
   late int defaultBtmProgressBehavior;
   late String defaultAoOutput;
+  late PlayRepeat defaultPlayRepeat;
 
   @override
   void initState() {
@@ -49,6 +52,12 @@ class _PlaySettingState extends State<PlaySetting> {
         defaultValue: BtmProgresBehavior.values.first.code);
     defaultAoOutput =
         setting.get(SettingBoxKey.defaultAoOutput, defaultValue: '0');
+    var repeatVal = videoStorage.get(VideoBoxKey.playRepeat,
+        defaultValue: PlayRepeat.listOrder.value);
+    defaultPlayRepeat = PlayRepeat.values.firstWhere(
+      (e) => e.value == repeatVal,
+      orElse: () => PlayRepeat.listOrder,
+    );
   }
 
   @override
@@ -103,9 +112,47 @@ class _PlaySettingState extends State<PlaySetting> {
           ),
           const SetSwitchItem(
             title: '自动播放',
-            subTitle: '进入详情页自动播放',
+            subTitle: '进入详情页起播及合集/分P自动连播下一集',
             setKey: SettingBoxKey.autoPlayEnable,
             defaultVal: true,
+          ),
+          ListTile(
+            dense: false,
+            title: Text('默认播放顺序', style: titleStyle),
+            subtitle: Text(
+              '当前设置：${defaultPlayRepeat.description}（合集/分P播完后操作）',
+              style: subTitleStyle,
+            ),
+            onTap: () async {
+              PlayRepeat? result = await showDialog(
+                context: context,
+                builder: (context) {
+                  return SelectDialog<PlayRepeat>(
+                    title: '默认播放顺序',
+                    value: defaultPlayRepeat,
+                    values: PlayRepeat.values.map((e) {
+                      String hint = '';
+                      if (e == PlayRepeat.listOrder) {
+                        hint = '（合集/分P自动连播下一集）';
+                      } else if (e == PlayRepeat.pause) {
+                        hint = '（单集播完停止）';
+                      } else if (e == PlayRepeat.singleCycle) {
+                        hint = '（单集循环播放）';
+                      } else if (e == PlayRepeat.listCycle) {
+                        hint = '（合集列表循环）';
+                      }
+                      return {'title': '${e.description} $hint', 'value': e};
+                    }).toList(),
+                  );
+                },
+              );
+              if (result != null) {
+                defaultPlayRepeat = result;
+                videoStorage.put(VideoBoxKey.playRepeat, result.value);
+                GlobalDataCache().playRepeat = result;
+                setState(() {});
+              }
+            },
           ),
           const SetSwitchItem(
             title: '后台播放',

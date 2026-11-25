@@ -1,5 +1,19 @@
 import 'package:pilipala/utils/em.dart';
-import 'package:pilipala/utils/utils.dart';
+
+int? searchInt(dynamic value) => value is num
+    ? (value.isFinite ? value.toInt() : null)
+    : int.tryParse(value?.toString() ?? '');
+
+int searchDuration(dynamic value) {
+  if (value is num) return searchInt(value) ?? 0;
+  final text = value?.toString() ?? '';
+  if (!text.contains(':')) return int.tryParse(text) ?? 0;
+  final parts = text.split(':').map(int.tryParse).toList();
+  if (parts.length > 3 || parts.any((part) => part == null || part < 0)) {
+    return 0;
+  }
+  return parts.fold(0, (seconds, part) => seconds * 60 + part!);
+}
 
 class SearchVideoModel {
   SearchVideoModel({this.list});
@@ -79,25 +93,23 @@ class SearchVideoItemModel {
   String? rcmdReason;
 
   SearchVideoItemModel.fromJson(Map<String, dynamic> json) {
-    type = json['type'];
-    id = json['id'];
-    arcurl = json['arcurl'];
-    aid = json['aid'];
-    bvid = json['bvid'];
-    mid = json['mid'];
-    title = json['title'].replaceAll(RegExp(r'<.*?>'), '');
+    type = json['type']?.toString() ?? 'video';
+    id = searchInt(json['id']);
+    arcurl = json['arcurl']?.toString();
+    aid = searchInt(json['aid']) ?? id;
+    bvid = json['bvid']?.toString();
+    mid = searchInt(json['mid']) ?? 0;
+    final rawTitle = json['title']?.toString() ?? '';
+    title = rawTitle.replaceAll(RegExp(r'<.*?>'), '');
     // title = Em.regTitle(json['title']);
-    titleList = Em.regTitle(json['title']);
-    description = json['description'];
-    pic = json['pic'] != null && json['pic'].startsWith('//')
-        ? 'https:${json['pic']}'
-        : json['pic'] ?? '';
-    videoReview = json['video_review'];
-    pubdate = json['pubdate'];
-    senddate = json['senddate'];
-    duration = json['duration'] != null
-        ? Utils.duration(json['duration'].toString())
-        : 0;
+    titleList = Em.regTitle(rawTitle);
+    description = json['description']?.toString() ?? '';
+    final rawPic = json['pic']?.toString() ?? '';
+    pic = rawPic.startsWith('//') ? 'https:$rawPic' : rawPic;
+    videoReview = searchInt(json['video_review']) ?? 0;
+    pubdate = searchInt(json['pubdate']) ?? 0;
+    senddate = searchInt(json['senddate']) ?? 0;
+    duration = searchDuration(json['duration']);
     owner = Owner.fromJson(json);
     stat = Stat.fromJson(json);
   }
@@ -124,12 +136,8 @@ class Stat {
   int? like;
 
   Stat.fromJson(Map<String, dynamic> json) {
-    view = json['play'] is int
-        ? json['play']
-        : int.tryParse(json['play']?.toString() ?? '');
-    danmaku = json['danmaku'] is int
-        ? json['danmaku']
-        : int.tryParse(json['danmaku']?.toString() ?? '');
+    view = searchInt(json['play']) ?? 0;
+    danmaku = searchInt(json['danmaku'] ?? json['video_review']) ?? 0;
     favorite = json['favorite'] is int
         ? json['favorite']
         : int.tryParse(json['favorite']?.toString() ?? '');
@@ -153,9 +161,9 @@ class Owner {
   String? face;
 
   Owner.fromJson(Map<String, dynamic> json) {
-    mid = json["mid"];
-    name = json["author"];
-    face = json['upic'];
+    mid = searchInt(json['mid']) ?? 0;
+    name = json['author']?.toString() ?? '';
+    face = json['upic']?.toString() ?? '';
   }
 }
 

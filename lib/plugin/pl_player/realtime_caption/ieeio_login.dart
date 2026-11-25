@@ -80,7 +80,7 @@ class IeeioLogin {
         Uri.parse('$defaultAsrServer/api/v1/auth/login'),
       );
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-      request.headers.set('User-Agent', 'Pilipala-Client');
+      request.headers.set('User-Agent', 'Lynxi-Client');
       request.add(utf8.encode(jsonEncode({
         'email': 'demo@asrclient.dev',
         'password': 'demo123456',

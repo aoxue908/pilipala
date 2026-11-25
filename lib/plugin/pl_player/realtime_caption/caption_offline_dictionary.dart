@@ -1,5 +1,7 @@
 import 'caption_dictionary.dart';
 import 'caption_pronunciation.dart';
+import 'caption_offline_phonetics.dart';
+import 'cantonese_lexicon.dart';
 
 /// 本地离线词典库（内置离线高频粤语词条与常用英文词汇）
 /// 保证无网络或弱网环境下 0ms 秒出注音、释义与例句
@@ -37,11 +39,12 @@ class CaptionOfflineDictionary {
     // 1. 优先查离线粤语词库（全匹配）
     if (_cantoneseDict.containsKey(query)) {
       final entry = _cantoneseDict[query]!;
+      final readings = CantoneseLexicon.shared.readings(query);
       return WordLookupResult(
         query: query,
-        phonetic: entry.jyutping,
+        phonetic: readings.isNotEmpty ? readings.first : entry.jyutping,
         audioUrl:
-            'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}',
+            'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}',
         definitions: [
           WordDefinition(partOfSpeech: '粤语', meanings: [entry.definition]),
         ],
@@ -91,11 +94,15 @@ class CaptionOfflineDictionary {
         (contextSentence != null &&
             CaptionPronunciation.isCantoneseText(contextSentence)) ||
         CaptionPronunciation.isCantoneseText(query)) {
-      final chars = query.split('');
+      final chars = query.runes.map(String.fromCharCode).toList();
+      final readings = CaptionOfflinePhonetics.alignedChineseReadings(query, cantonese: true);
       final jyutpingList = <String>[];
       var allFound = true;
+      var index = 0;
       for (final c in chars) {
-        if (_cantoneseCharJyutping.containsKey(c)) {
+        if (readings.containsKey(index)) {
+          jyutpingList.add(readings[index]!);
+        } else if (_cantoneseCharJyutping.containsKey(c)) {
           jyutpingList.add(_cantoneseCharJyutping[c]!);
         } else if (_cantoneseDict.containsKey(c)) {
           jyutpingList.add(_cantoneseDict[c]!.jyutping);
@@ -103,14 +110,16 @@ class CaptionOfflineDictionary {
           allFound = false;
           break;
         }
+        index += c.length;
       }
-      if (allFound && jyutpingList.isNotEmpty) {
-        final jyutping = jyutpingList.join(' ');
+      final variants = CantoneseLexicon.shared.readings(query);
+      if (variants.isNotEmpty || (allFound && jyutpingList.isNotEmpty)) {
+        final jyutping = variants.isNotEmpty ? variants.join(' / ') : jyutpingList.join(' ');
         return WordLookupResult(
           query: query,
           phonetic: jyutping,
           audioUrl:
-              'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}',
+              'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-HK&q=${Uri.encodeComponent(query)}',
           definitions: [
             WordDefinition(partOfSpeech: '粤语', meanings: ['粤语发音词条（粤拼: $jyutping）']),
           ],
@@ -608,6 +617,34 @@ class CaptionOfflineDictionary {
       definition: '美女；年轻女子。',
       example: '嗰位靚女好有氣質。',
       exampleTranslation: '那位美女很有气质。',
+    ),
+    '佢': const _CantoneseEntry(
+      jyutping: 'keoi5', definition: '他、她、它；粤语第三人称代词，不区分性别。',
+      example: '佢喺屋企。', exampleTranslation: '他／她在家。',
+    ),
+    '嘅': const _CantoneseEntry(
+      jyutping: 'ge3', definition: '表示所属或修饰关系，相当于“的”；也可作句末语气词，读音随用法变化。',
+      example: '呢個係我嘅。', exampleTranslation: '这个是我的。',
+    ),
+    '咗': const _CantoneseEntry(
+      jyutping: 'zo2', definition: '表示动作完成或状态发生变化，常相当于“了”；并非所有过去的事情都要加“咗”。',
+      example: '佢食咗飯。', exampleTranslation: '他／她吃了饭。',
+    ),
+    '喺': const _CantoneseEntry(
+      jyutping: 'hai2', definition: '在、位于，表示时间或地点；与表示“是”的“係 hai6”不同。',
+      example: '我喺呢度。', exampleTranslation: '我在这里。',
+    ),
+    '嚟': const _CantoneseEntry(
+      jyutping: 'lei4', definition: '来；常用口语字，有 lai4、lei4 两种读法，也用于“返嚟”等趋向表达。',
+      example: '佢返嚟喇。', exampleTranslation: '他／她回来了。',
+    ),
+    '嗰': const _CantoneseEntry(
+      jyutping: 'go2', definition: '那，指示较远或前面提到的人、事物，常用于“嗰個、嗰度”。',
+      example: '嗰個係佢。', exampleTranslation: '那个人是他／她。',
+    ),
+    '嘢': const _CantoneseEntry(
+      jyutping: 'je5', definition: '东西、事情；常用于“乜嘢（什么）、食嘢（吃东西）”。',
+      example: '你食咩嘢？', exampleTranslation: '你吃什么东西？',
     ),
     '唔': _CantoneseEntry(
       jyutping: 'm4',

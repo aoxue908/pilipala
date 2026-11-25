@@ -260,29 +260,39 @@ class BangumiIntroController extends GetxController {
 
   /// 列表循环或者顺序播放时，自动播放下一个
   void nextPlay() {
-    late List episodes;
+    List episodes = [];
     if (bangumiDetail.value.episodes != null) {
       episodes = bangumiDetail.value.episodes!;
+    }
+    if (episodes.isEmpty) {
+      return;
     }
     VideoDetailController videoDetailCtr =
         Get.find<VideoDetailController>(tag: Get.arguments['heroTag']);
     int currentIndex =
         episodes.indexWhere((e) => e.cid == videoDetailCtr.cid.value);
+    if (currentIndex == -1) {
+      currentIndex = 0;
+    }
     int nextIndex = currentIndex + 1;
     PlayRepeat platRepeat = videoDetailCtr.plPlayerController.playRepeat;
-    // 列表循环
-    if (platRepeat == PlayRepeat.listCycle) {
-      if (nextIndex == episodes.length - 1) {
+    // 列表循环或顺序播放
+    if (nextIndex >= episodes.length) {
+      if (platRepeat == PlayRepeat.listCycle) {
         nextIndex = 0;
+      } else {
+        if (episodes.length > 1) {
+          SmartDialog.showToast('已播放到最后一集');
+        }
+        return;
       }
     }
-    if (nextIndex <= episodes.length - 1 &&
-        platRepeat == PlayRepeat.listOrder) {}
 
-    int cid = episodes[nextIndex].cid!;
-    String bvid = episodes[nextIndex].bvid!;
-    int aid = episodes[nextIndex].aid!;
-    String cover = episodes[nextIndex].cover!;
+    final nextItem = episodes[nextIndex];
+    int cid = nextItem.cid!;
+    String bvid = nextItem.bvid!;
+    int aid = nextItem.aid ?? IdUtils.bv2av(bvid);
+    String cover = nextItem.cover ?? '';
     changeSeasonOrbangu(bvid, cid, aid, cover);
   }
 

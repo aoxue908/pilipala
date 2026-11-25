@@ -49,8 +49,12 @@ class _AboutPageState extends State<AboutPage> {
               width: 150,
             ),
             Text(
-              'PiliPala',
-              style: Theme.of(context).textTheme.titleMedium,
+              'Lynxi (灵犀)',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.5,
+                  ) ??
+                  Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 6),
             Obx(
@@ -112,6 +116,12 @@ class _AboutPageState extends State<AboutPage> {
             //     size: 16,
             //   ),
             // ),
+            ListTile(
+              onTap: () => showLicensePage(context: context),
+              title: const Text('开源许可与注音字库'),
+              subtitle: const Text('Rime Cantonese · Kuromoji / IPADIC'),
+              trailing: const Icon(Icons.chevron_right),
+            ),
             ListTile(
               onTap: () => _aboutController.githubUrl(),
               title: const Text('开源地址'),

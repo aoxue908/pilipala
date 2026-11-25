@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
-import 'package:pilipala/common/widgets/http_error.dart';
 import 'package:pilipala/common/widgets/video_card_h.dart';
 import 'package:pilipala/models/common/search_type.dart';
 import 'package:pilipala/pages/search/widgets/search_text.dart';
@@ -17,7 +16,8 @@ class SearchVideoPanel extends StatelessWidget {
   final SearchPanelController? ctr;
   final List? list;
 
-  final VideoPanelController controller = Get.put(VideoPanelController());
+  late final VideoPanelController controller = Get.put(VideoPanelController(),
+      tag: 'search-filter-${identityHashCode(ctr)}');
 
   @override
   Widget build(BuildContext context) {
@@ -29,6 +29,7 @@ class SearchVideoPanel extends StatelessWidget {
           child: list!.isNotEmpty
               ? ListView.builder(
                   controller: ctr!.scrollController,
+                  physics: const AlwaysScrollableScrollPhysics(),
                   addAutomaticKeepAlives: false,
                   addRepaintBoundaries: false,
                   itemCount: list!.length,
@@ -47,11 +48,50 @@ class SearchVideoPanel extends StatelessWidget {
                   },
                 )
               : CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
                   slivers: [
-                    HttpError(
-                      errMsg: '没有数据',
-                      isShowBtn: false,
-                      fn: () => {},
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+                        child:
+                            Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(
+                              ctr!.errorMessage.value.isNotEmpty
+                                  ? Icons.cloud_off_outlined
+                                  : Icons.search_off,
+                              size: 40,
+                              color: Theme.of(context).colorScheme.outline),
+                          const SizedBox(height: 8),
+                          Text(
+                              ctr!.errorMessage.value.isNotEmpty
+                                  ? ctr!.errorMessage.value
+                                  : ctr!.emptyMessage.value.isNotEmpty
+                                      ? ctr!.emptyMessage.value
+                                      : '暂无搜索结果',
+                              textAlign: TextAlign.center),
+                          const SizedBox(height: 8),
+                          Wrap(
+                              spacing: 8,
+                              alignment: WrapAlignment.center,
+                              children: [
+                                if (ctr!.requiresVerification.value)
+                                  FilledButton(
+                                    onPressed: ctr!.openOfficialSearch,
+                                    child: const Text('打开官方搜索'),
+                                  ),
+                                FilledButton.tonal(
+                                  onPressed: () => ctr!.hasMore &&
+                                          ctr!.emptyMessage.value.contains('屏蔽')
+                                      ? ctr!.onSearch(type: 'onLoad')
+                                      : ctr!.onRefresh(),
+                                  child: Text(ctr!.hasMore &&
+                                          ctr!.emptyMessage.value.contains('屏蔽')
+                                      ? '加载下一页'
+                                      : '重新加载'),
+                                ),
+                              ]),
+                        ]),
+                      ),
                     )
                   ],
                 ),
@@ -240,9 +280,7 @@ class VideoPanelController extends GetxController {
                       setState(() {});
                       SmartDialog.dismiss();
                       SmartDialog.showToast("「${i['label']}」的筛选结果");
-                      SearchPanelController ctr =
-                          Get.find<SearchPanelController>(
-                              tag: 'video${searchPanelCtr.keyword!}');
+                      final SearchPanelController ctr = searchPanelCtr;
                       ctr.duration.value = i['value'];
                       SmartDialog.showLoading(msg: 'loading');
                       await ctr.onRefresh();
@@ -300,9 +338,8 @@ class VideoPanelController extends GetxController {
                                     setState(() {});
                                     SmartDialog.showToast(
                                         "「${i['label']}」的筛选结果");
-                                    SearchPanelController ctr = Get.find<
-                                            SearchPanelController>(
-                                        tag: 'video${searchPanelCtr.keyword!}');
+                                    final SearchPanelController ctr =
+                                        searchPanelCtr;
                                     ctr.duration.value = i['value'];
                                     Get.back();
                                     SmartDialog.showLoading(msg: '获取中');
@@ -336,9 +373,8 @@ class VideoPanelController extends GetxController {
                                   currentPartFilterval.value = i['value'];
                                   setState(() {});
                                   SmartDialog.showToast("「${i['label']}」的筛选结果");
-                                  SearchPanelController ctr = Get.find<
-                                          SearchPanelController>(
-                                      tag: 'video${searchPanelCtr.keyword!}');
+                                  final SearchPanelController ctr =
+                                      searchPanelCtr;
                                   ctr.tids.value = i['value'];
                                   Get.back();
                                   SmartDialog.showLoading(msg: '获取中');

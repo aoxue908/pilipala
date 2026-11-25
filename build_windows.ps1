@@ -1,4 +1,4 @@
-# Pilipala Windows Desktop Build Script (PowerShell)
+# Lynxi Windows Desktop Build Script (PowerShell)
 [CmdletBinding()]
 param (
     [switch]$Clean
@@ -7,7 +7,7 @@ param (
 $ErrorActionPreference = 'Stop'
 
 Write-Host '========================================================' -ForegroundColor Cyan
-Write-Host '  Pilipala Windows Desktop Build Tool (VS 2026 Ready)' -ForegroundColor Cyan
+Write-Host '  Lynxi Windows Desktop Build Tool (VS 2026 Ready)' -ForegroundColor Cyan
 Write-Host '========================================================' -ForegroundColor Cyan
 Write-Host ''
 
@@ -49,11 +49,67 @@ if ($Clean) {
 }
 
 # 4. Resolve dependencies
-Write-Host '[*] Resolving Flutter package dependencies...' -ForegroundColor Cyan
-& flutter pub get
-if ($LASTEXITCODE -ne 0) {
-    Write-Host '[ERROR] flutter pub get failed!' -ForegroundColor Red
-    exit 1
+if (-not (Test-Path '.dart_tool\package_config.json')) {
+    Write-Host '[*] Resolving Flutter package dependencies...' -ForegroundColor Cyan
+    & flutter pub get --offline
+    if ($LASTEXITCODE -ne 0) {
+        & flutter pub get
+    }
+} else {
+    Write-Host '[*] Package configuration cached, skipping pub get.' -ForegroundColor Green
+}
+
+# 4.5 Ensure Flutter Windows Ephemeral files & CMake configuration are prepared
+$ephemeralDir = Join-Path $PSScriptRoot 'windows\flutter\ephemeral'
+$ephemeralConfig = Join-Path $ephemeralDir 'generated_config.cmake'
+if (-not (Test-Path $ephemeralConfig) -or -not (Test-Path (Join-Path $ephemeralDir 'flutter_windows.dll'))) {
+    Write-Host '[*] Preparing Flutter Windows ephemeral engine files & configs...' -ForegroundColor Cyan
+    if (-not (Test-Path $ephemeralDir)) {
+        New-Item -ItemType Directory -Path $ephemeralDir -Force | Out-Null
+    }
+
+    $engineArtifacts = 'D:\FlutterSDK\flutter3.19.6\bin\cache\artifacts\engine\windows-x64'
+    if (Test-Path $engineArtifacts) {
+        Copy-Item (Join-Path $engineArtifacts 'flutter_windows.dll') -Destination $ephemeralDir -Force -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $engineArtifacts 'flutter_windows.dll.lib') -Destination $ephemeralDir -Force -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $engineArtifacts 'flutter_windows.dll.exp') -Destination $ephemeralDir -Force -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $engineArtifacts 'icudtl.dat') -Destination $ephemeralDir -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $engineArtifacts -Filter '*.h' | ForEach-Object {
+            Copy-Item $_.FullName -Destination $ephemeralDir -Force -ErrorAction SilentlyContinue
+        }
+        $wrapperSrc = Join-Path $engineArtifacts 'cpp_client_wrapper'
+        $wrapperDst = Join-Path $ephemeralDir 'cpp_client_wrapper'
+        if ((Test-Path $wrapperSrc) -and -not (Test-Path $wrapperDst)) {
+            Copy-Item $wrapperSrc -Destination $wrapperDst -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not (Test-Path $ephemeralConfig)) {
+        $configContent = @"
+# Generated code do not commit.
+file(TO_CMAKE_PATH "D:\\FlutterSDK\\flutter3.19.6" FLUTTER_ROOT)
+file(TO_CMAKE_PATH "$PSScriptRoot" PROJECT_DIR)
+
+set(FLUTTER_VERSION "1.0.25+1025" PARENT_SCOPE)
+set(FLUTTER_VERSION_MAJOR 1 PARENT_SCOPE)
+set(FLUTTER_VERSION_MINOR 0 PARENT_SCOPE)
+set(FLUTTER_VERSION_PATCH 25 PARENT_SCOPE)
+set(FLUTTER_VERSION_BUILD 1025 PARENT_SCOPE)
+
+# Environment variables to pass to tool_backend.sh
+list(APPEND FLUTTER_TOOL_ENVIRONMENT
+  "FLUTTER_ROOT=D:\\FlutterSDK\\flutter3.19.6"
+  "PROJECT_DIR=$PSScriptRoot"
+  "FLUTTER_EPHEMERAL_DIR=$ephemeralDir"
+  "FLUTTER_TARGET=lib\\main.dart"
+  "DART_OBFUSCATION=false"
+  "TRACK_WIDGET_CREATION=true"
+  "TREE_SHAKE_ICONS=true"
+  "PACKAGE_CONFIG=$PSScriptRoot\\.dart_tool\\package_config.json"
+)
+"@
+        Set-Content -Path $ephemeralConfig -Value $configContent -Encoding UTF8
+    }
 }
 
 # 5. Generate CMake build configuration
@@ -125,7 +181,8 @@ if (Test-Path $sherpaPubDir) {
     }
 }
 
-$exePath = Join-Path $outDir 'pilipala.exe'
+if (Test-Path (Join-Path $outDir 'pilipala.exe')) { Copy-Item (Join-Path $outDir 'pilipala.exe') (Join-Path $outDir 'lynxi.exe') -Force; Remove-Item (Join-Path $outDir 'pilipala.exe') -Force -ErrorAction SilentlyContinue }
+$exePath = Join-Path $outDir 'lynxi.exe'
 
 Write-Host ''
 Write-Host '========================================================' -ForegroundColor Green
@@ -133,8 +190,32 @@ Write-Host '[BUILD SUCCESS] Windows Desktop Application Exported!' -ForegroundCo
 Write-Host '========================================================' -ForegroundColor Green
 Write-Host "Output Directory: $outDir" -ForegroundColor White
 Write-Host "Executable Path:  $exePath" -ForegroundColor White
+# 8. Automatically Build Inno Setup Installer if available
+$isccPaths = @(
+    'C:\Program Files\Inno Setup 7\ISCC.exe',
+    'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+    'C:\Program Files\Inno Setup 6\ISCC.exe'
+)
+$isccExe = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+$issFile = Join-Path $PSScriptRoot 'windows\installer.iss'
+
+if ($isccExe -and (Test-Path $issFile)) {
+    Write-Host ''
+    Write-Host '[*] Packaging Windows Installer EXE using Inno Setup...' -ForegroundColor Cyan
+    & $isccExe $issFile
+    if ($LASTEXITCODE -eq 0) {
+        $setupExe = Join-Path $PSScriptRoot 'Lynxi-Setup-1.0.25-x64.exe'
+        $rootExe = Join-Path $PSScriptRoot 'app-release.exe'
+        if (Test-Path $setupExe) {
+            Copy-Item $setupExe -Destination $rootExe -Force -ErrorAction SilentlyContinue
+            Write-Host "[*] Installer EXE: $setupExe" -ForegroundColor Green
+            Write-Host "[*] Release EXE:   $rootExe" -ForegroundColor Green
+        }
+    }
+}
+
 Write-Host ''
 Write-Host 'Distribution note:' -ForegroundColor Gray
 Write-Host 'The entire Release directory is a self-contained portable application.' -ForegroundColor Gray
-Write-Host 'You can directly zip this folder or package it using Inno Setup.' -ForegroundColor Gray
+Write-Host 'Installer and standalone packages are ready for deployment.' -ForegroundColor Gray
 Write-Host '========================================================' -ForegroundColor Green

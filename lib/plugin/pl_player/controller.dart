@@ -41,6 +41,11 @@ class PlPlayerController {
   // 流事件  监听播放状态变化
   StreamSubscription? _playerEventSubs;
 
+  // 本地文件（离线缓存）播放诊断：跟踪 mpv 解码/视频输出，定位「只有声音没画面」。
+  StreamSubscription<PlayerLog>? _localLogSub;
+  StreamSubscription<Tracks>? _localTracksSub;
+  StreamSubscription<VideoParams>? _localVideoParamsSub;
+
   /// [playerStatus] has a [status] observable
   final PlPlayerStatus playerStatus = PlPlayerStatus();
 
@@ -77,6 +82,9 @@ class PlPlayerController {
   final Rx<bool> _doubleSpeedStatus = false.obs;
   final Rx<bool> _controlsLock = false.obs;
   final Rx<bool> _isFullScreen = false.obs;
+  final Rx<bool> _isNativeFullScreen = false.obs;
+  // 当前全屏是否保持竖屏方向（用于右下角双按钮的图标切换）
+  final Rx<bool> _isVerticalFullScreen = false.obs;
   // 默认投稿视频格式
   static Rx<String> _videoType = 'archive'.obs;
 
@@ -211,6 +219,9 @@ class PlPlayerController {
 
   /// 全屏状态
   Rx<bool> get isFullScreen => _isFullScreen;
+  Rx<bool> get isNativeFullScreen => _isNativeFullScreen;
+  /// 当前全屏是否保持竖屏方向
+  Rx<bool> get isVerticalFullScreen => _isVerticalFullScreen;
 
   /// 全屏方向
   Rx<String> get direction => _direction;
@@ -237,7 +248,7 @@ class PlPlayerController {
   late bool enableAutoLongPressSpeed = false;
 
   // 播放顺序相关
-  PlayRepeat playRepeat = PlayRepeat.pause;
+  PlayRepeat playRepeat = PlayRepeat.listOrder;
 
   late final captionPreferences = CaptionPreferences(videoStorage);
   late final realtimeCaptions =
@@ -336,6 +347,7 @@ class PlPlayerController {
     bool enableSubTitle = false,
   }) async {
     final captionSourceRevision = ++_captionSourceRevision;
+    debugPrint('[local-play] setDataSource type=${dataSource.type} video=${dataSource.videoSource} audio=${dataSource.audioSource} bvid=$bvid cid=$cid');
     try {
       realtimeCaptions.detach();
       if (bvid.isNotEmpty) realtimeCaptions.prepareTracks(bvid, cid);
@@ -387,13 +399,12 @@ class PlPlayerController {
       }
     } catch (err) {
       dataStatus.status.value = DataStatus.error;
-      print('plPlayer err:  $err');
+      debugPrint('plPlayer err:  $err\n${StackTrace.current}');
     }
   }
 
   // 配置播放器
-  Future<Player> _createVideoController(
-    DataSource dataSource,
+  Future<Player> _createVideoController(    DataSource dataSource,
     PlaylistMode looping,
     bool enableHA,
     double? width,
@@ -422,6 +433,38 @@ class PlPlayerController {
     var pp = player.platform as NativePlayer;
     // 解除倍速限制
     await pp.setProperty("af", "scaletempo2=max-speed=8");
+
+    // 本地文件（离线缓存）播放诊断：上一轮订阅先取消；file 类型时挂上
+    // mpv 关键日志 + 轨道/视频参数监听，出问题时可用 adb logcat -s flutter 直接定位。
+    await _cancelLocalDiagnostics();
+    if (dataSource.type == DataSourceType.file) {
+      _localTracksSub = player.stream.tracks.listen((t) {
+        final selected = player.state.tracks.video;
+        final selectedAudio = player.state.tracks.audio;
+        debugPrint(
+            '[local-play] tracks: video=${t.video.length} audio=${t.audio.length} '
+            'selectedVideo=${selected.isNotEmpty ? selected.first.id : '-'} '
+            'selectedAudio=${selectedAudio.isNotEmpty ? '${selectedAudio.first.id}:${selectedAudio.first.title}' : '-'}');
+      });
+      _localVideoParamsSub = player.stream.videoParams.listen((p) {
+        debugPrint('[local-play] videoParams: ${p.dw}x${p.dh} '
+            'rotate=${p.rotate} pixfmt=${p.pixelformat} '
+            'hw=${p.hwPixelformat}');
+      });
+      _localLogSub = player.stream.log.listen((e) {
+        final String level = e.level;
+        final String prefix = e.prefix;
+        if (level == 'error' ||
+            level == 'warn' ||
+            prefix == 'vo' ||
+            prefix == 'vd' ||
+            prefix == 'cplayer' ||
+            prefix == 'lavd') {
+          debugPrint('[local-play][$level/$prefix] ${e.text}');
+        }
+      });
+    }
+
     //  音量不一致
     if (Platform.isAndroid) {
       await pp.setProperty("volume-max", "100");
@@ -434,24 +477,20 @@ class PlPlayerController {
               .first['title']);
     }
 
-    await player.setAudioTrack(
-      AudioTrack.auto(),
+    // 切换数据源前停止旧媒体，再重置外置音轨。否则从网络 DASH 切到
+    // 本地一体 MP4 时，旧的 audio-files 会继续作为外置音轨播放，出现
+    // “画面是新视频、声音却是上一条”的串音。
+    await player.stop();
+    final String? externalAudio = dataSource.audioSource;
+    await pp.setProperty(
+      'audio-files',
+      externalAudio == null || externalAudio.isEmpty
+          ? ''
+          : UniversalPlatform.isWindows
+              ? externalAudio.replaceAll(';', '\\;')
+              : externalAudio.replaceAll(':', '\\:'),
     );
-
-    // 音轨
-    if (dataSource.audioSource != '' && dataSource.audioSource != null) {
-      await pp.setProperty(
-        'audio-files',
-        UniversalPlatform.isWindows
-            ? dataSource.audioSource!.replaceAll(';', '\\;')
-            : dataSource.audioSource!.replaceAll(':', '\\:'),
-      );
-    } else {
-      await pp.setProperty(
-        'audio-files',
-        '',
-      );
-    }
+    await player.setAudioTrack(AudioTrack.auto());
 
     // 字幕
     // if (dataSource.subFiles != '' && dataSource.subFiles != null) {
@@ -466,12 +505,18 @@ class PlPlayerController {
     //   await pp.setProperty("blend-subtitles", "video");
     // }
 
+    // Surface 绑定路径：统一走「先绑 Surface、后出画面」的默认时序（attach=false）。
+    // 该路径已被网络播放长期验证可正常出画面；此前本地文件曾单独走「视频参数确定后
+    // 再绑 Surface」(attach=true) 的路径，真机实测只有声音、没有画面，故不再区分。
+    const bool attachSurfaceAfterVideoParams = false;
+
     _videoController = _videoController ??
         VideoController(
           player,
           configuration: VideoControllerConfiguration(
             enableHardwareAcceleration: enableHA,
-            androidAttachSurfaceAfterVideoParameters: false,
+            androidAttachSurfaceAfterVideoParameters:
+                attachSurfaceAfterVideoParams,
           ),
         );
 
@@ -491,12 +536,38 @@ class PlPlayerController {
           httpHeaders: dataSource.httpHeaders, start: seekTo),
       play: false,
     );
-    // 音轨
-    // player.setAudioTrack(
-    //   AudioTrack.uri(dataSource.audioSource!),
-    // );
+    // 离线缓存的 DASH 视频轨（m4s）与音频轨（m4a）是两个独立文件：
+    // 视频轨没有内嵌声音，必须把音频文件作为【外部音轨】挂上，否则只有画面没声音。
+    // 反之若用户误把音频文件当视频打开，也在这里纠正为无画面提示。
+    if (dataSource.type == DataSourceType.file &&
+        dataSource.audioSource != null &&
+        dataSource.audioSource!.isNotEmpty) {
+      try {
+        await player.setAudioTrack(
+          AudioTrack.uri(
+            dataSource.audioSource!,
+            title: '离线音频',
+          ),
+        );
+      } catch (e) {
+        print('挂载外部音轨失败: $e');
+      }
+    } else if (dataSource.type == DataSourceType.file) {
+      // 一体 MP4 只允许使用内嵌音轨，不能沿用上一数据源的外部音频。
+      await player.setAudioTrack(AudioTrack.auto());
+    }
 
     return player;
+  }
+
+  /// 取消本地播放诊断订阅。
+  Future<void> _cancelLocalDiagnostics() async {
+    await _localLogSub?.cancel();
+    await _localTracksSub?.cancel();
+    await _localVideoParamsSub?.cancel();
+    _localLogSub = null;
+    _localTracksSub = null;
+    _localVideoParamsSub = null;
   }
 
   // 开始播放
@@ -627,6 +698,7 @@ class PlPlayerController {
     for (final s in subscriptions) {
       s.cancel();
     }
+    subscriptions.clear();
   }
 
   /// 跳转至指定位置
@@ -951,27 +1023,94 @@ class PlPlayerController {
   }
 
   // 全屏
-  Future<void> triggerFullScreen({bool status = true}) async {
-    FullScreenMode mode = FullScreenModeCode.fromCode(
-        setting.get(SettingBoxKey.fullScreenMode, defaultValue: 0))!;
-    await StatusBarControl.setHidden(true, animation: StatusBarAnimation.FADE);
-    if (!isFullScreen.value && status) {
-      /// 按照视频宽高比决定全屏方向
+  /// [forceMode] 用于右下角双按钮：竖屏全屏传 vertical、横屏全屏传 horizontal，
+  /// 不传则沿用用户在设置里的全屏模式（保持向后兼容，所有旧调用点无需改动）。
+  Future<void> triggerFullScreen({
+    bool? status,
+    FullScreenMode? forceMode,
+  }) async {
+    final bool targetStatus = status ?? !isFullScreen.value;
+
+    FullScreenMode mode = forceMode ??
+        FullScreenModeCode.fromCode(
+            setting.get(SettingBoxKey.fullScreenMode, defaultValue: 0))!;
+
+    // 已在全屏、但按钮要求切换到另一种方向（竖屏 ↔ 横屏）：
+    // 不退出全屏，只切换屏幕方向，实现两个按钮间平滑互切。
+    if (targetStatus && isFullScreen.value && forceMode != null) {
+      final bool wantVertical = mode == FullScreenMode.vertical ||
+          (mode == FullScreenMode.auto && direction.value == 'vertical');
+      if (wantVertical != _isVerticalFullScreen.value) {
+        await _applyFullScreenDirection(wantVertical);
+        return;
+      }
+    }
+
+    if (targetStatus == isFullScreen.value) {
+      return;
+    }
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        await StatusBarControl.setHidden(targetStatus,
+            animation: StatusBarAnimation.FADE);
+      }
+    } catch (_) {}
+
+    if (targetStatus) {
+      /// 按照视频宽高比（或按钮指定方向）决定全屏方向
       toggleFullScreen(true);
 
       /// 进入全屏
-      await enterFullScreen();
-      if (mode == FullScreenMode.vertical ||
-          (mode == FullScreenMode.auto && direction.value == 'vertical')) {
+      final bool wantVertical = mode == FullScreenMode.vertical ||
+          (mode == FullScreenMode.auto && direction.value == 'vertical');
+      if (Platform.isAndroid || Platform.isIOS) {
+        await enterFullScreen();
+      }
+      await _applyFullScreenDirection(wantVertical);
+      // 桌面端（Windows / macOS / Linux）：
+      // 铺满窗口（网页全屏/窗口全屏），保持画面宽高比，避免将整个系统窗口强行置为系统独占全屏
+    } else {
+      try {
+        if (Platform.isAndroid || Platform.isIOS) {
+          StatusBarControl.setHidden(false, animation: StatusBarAnimation.FADE);
+        }
+      } catch (_) {}
+      if (Platform.isAndroid || Platform.isIOS) {
+        await exitFullScreen();
+        await verticalScreen();
+      } else {
+        if (_isNativeFullScreen.value) {
+          await exitFullScreen();
+          _isNativeFullScreen.value = false;
+        }
+      }
+      toggleFullScreen(false);
+      _isVerticalFullScreen.value = false;
+    }
+  }
+
+  /// 应用全屏方向：竖屏全屏保持竖屏，横屏全屏旋转到横屏。
+  /// 桌面端不旋转屏幕，仅记录方向状态用于按钮图标切换。
+  Future<void> _applyFullScreenDirection(bool wantVertical) async {
+    _isVerticalFullScreen.value = wantVertical;
+    if (Platform.isAndroid || Platform.isIOS) {
+      if (wantVertical) {
         await verticalScreen();
       } else {
         await landScape();
       }
-    } else if (isFullScreen.value && !status) {
-      StatusBarControl.setHidden(false, animation: StatusBarAnimation.FADE);
-      exitFullScreen();
-      await verticalScreen();
-      toggleFullScreen(false);
+    }
+  }
+
+  /// 桌面端切换系统级全屏 (如 F11)
+  Future<void> toggleNativeFullScreen() async {
+    if (Platform.isAndroid || Platform.isIOS) return;
+    if (_isNativeFullScreen.value) {
+      await exitFullScreen();
+      _isNativeFullScreen.value = false;
+    } else {
+      await landScape();
+      _isNativeFullScreen.value = true;
     }
   }
 
@@ -1062,6 +1201,7 @@ class PlPlayerController {
       timerForTrackingMouse?.cancel();
       _timerForSeek?.cancel();
       videoFitChangedTimer?.cancel();
+      await _cancelLocalDiagnostics();
       // _position.close();
       _playerEventSubs?.cancel();
       // _sliderPosition.close();
@@ -1083,7 +1223,14 @@ class PlPlayerController {
         await _videoPlayerController?.dispose();
         _videoPlayerController = null;
       }
+      // VideoController 与 Player 绑定，销毁 Player 后必须释放，
+      // 否则下次播放本地文件时会复用旧配置，导致黑屏。
+      _videoController = null;
       _instance = null;
+      if (_isNativeFullScreen.value) {
+        await exitFullScreen();
+        _isNativeFullScreen.value = false;
+      }
       // 关闭所有视频页面恢复亮度
       resetBrightness();
       videoPlayerServiceHandler.clear();

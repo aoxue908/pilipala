@@ -14,6 +14,7 @@ class CaptionTtsConfig {
   const CaptionTtsConfig({
     required this.engine,
     required this.edgeCantoneseVoice,
+    this.edgeMandarinVoice = defaultEdgeMandarinVoice,
     required this.mimoVoice,
     required this.mimoApiKey,
     required this.mimoBaseUrl,
@@ -22,18 +23,21 @@ class CaptionTtsConfig {
   /// tts 引擎: 'edge' | 'mimo' | 'system'
   final String engine;
   final String edgeCantoneseVoice;
+  final String edgeMandarinVoice;
   final String mimoVoice;
   final String mimoApiKey;
   final String mimoBaseUrl;
 
   static const String keyEngine = 'caption_tts_engine';
   static const String keyEdgeVoice = 'caption_tts_edge_voice';
+  static const String keyEdgeMandarinVoice = 'caption_tts_edge_mandarin_voice';
   static const String keyMiMoVoice = 'caption_tts_mimo_voice';
   static const String keyMiMoApiKey = 'caption_tts_mimo_api_key';
   static const String keyMiMoBaseUrl = 'caption_tts_mimo_base_url';
 
   static const String defaultEngine = 'edge';
   static const String defaultEdgeVoice = 'zh-HK-HiuMaanNeural';
+  static const String defaultEdgeMandarinVoice = 'zh-CN-XiaoxiaoNeural';
   static const String defaultMiMoVoice = 'default';
   static const String defaultMiMoBaseUrl = 'https://api.xiaomimimo.com/v1';
 
@@ -43,6 +47,7 @@ class CaptionTtsConfig {
       return CaptionTtsConfig(
         engine: box.get(keyEngine, defaultValue: defaultEngine) as String,
         edgeCantoneseVoice: box.get(keyEdgeVoice, defaultValue: defaultEdgeVoice) as String,
+        edgeMandarinVoice: box.get(keyEdgeMandarinVoice, defaultValue: defaultEdgeMandarinVoice) as String,
         mimoVoice: box.get(keyMiMoVoice, defaultValue: defaultMiMoVoice) as String,
         mimoApiKey: box.get(keyMiMoApiKey, defaultValue: '') as String,
         mimoBaseUrl: box.get(keyMiMoBaseUrl, defaultValue: defaultMiMoBaseUrl) as String,
@@ -51,6 +56,7 @@ class CaptionTtsConfig {
       return const CaptionTtsConfig(
         engine: defaultEngine,
         edgeCantoneseVoice: defaultEdgeVoice,
+        edgeMandarinVoice: defaultEdgeMandarinVoice,
         mimoVoice: defaultMiMoVoice,
         mimoApiKey: '',
         mimoBaseUrl: defaultMiMoBaseUrl,
@@ -63,6 +69,7 @@ class CaptionTtsConfig {
       final box = GStrorage.setting;
       await box.put(keyEngine, engine);
       await box.put(keyEdgeVoice, edgeCantoneseVoice);
+      await box.put(keyEdgeMandarinVoice, edgeMandarinVoice);
       await box.put(keyMiMoVoice, mimoVoice);
       await box.put(keyMiMoApiKey, mimoApiKey);
       await box.put(keyMiMoBaseUrl, mimoBaseUrl);
@@ -90,6 +97,14 @@ class CaptionTtsService {
     'zh-HK-HiuGaaiNeural': '晓佳 (女声 · 活泼灵动)',
   };
 
+  // Edge-TTS 普通话发音人列表
+  static const Map<String, String> edgeMandarinVoices = {
+    'zh-CN-XiaoxiaoNeural': '晓晓 (女声 · 温暖亲切 · 默认)',
+    'zh-CN-YunxiNeural': '云希 (男声 · 阳光活力)',
+    'zh-CN-YunjianNeural': '云健 (男声 · 沉稳播音)',
+    'zh-CN-XiaoyiNeural': '晓伊 (女声 · 温柔抒情)',
+  };
+
   // 小米 MiMo-V2.5-TTS 音色列表
   static const Map<String, String> mimoVoices = {
     'default': '官方默认音色',
@@ -102,6 +117,7 @@ class CaptionTtsService {
   Future<void> updateConfig({
     String? engine,
     String? edgeCantoneseVoice,
+    String? edgeMandarinVoice,
     String? mimoVoice,
     String? mimoApiKey,
     String? mimoBaseUrl,
@@ -109,6 +125,7 @@ class CaptionTtsService {
     _config = CaptionTtsConfig(
       engine: engine ?? _config.engine,
       edgeCantoneseVoice: edgeCantoneseVoice ?? _config.edgeCantoneseVoice,
+      edgeMandarinVoice: edgeMandarinVoice ?? _config.edgeMandarinVoice,
       mimoVoice: mimoVoice ?? _config.mimoVoice,
       mimoApiKey: mimoApiKey ?? _config.mimoApiKey,
       mimoBaseUrl: mimoBaseUrl ?? _config.mimoBaseUrl,
@@ -220,7 +237,7 @@ class CaptionTtsService {
         return _config.edgeCantoneseVoice;
       case 'zh':
       case 'zh-cn':
-        return 'zh-CN-XiaoxiaoNeural';
+        return _config.edgeMandarinVoice;
       case 'en':
       case 'en-us':
         return 'en-US-JennyNeural';
@@ -230,6 +247,28 @@ class CaptionTtsService {
         return 'ja-JP-NanamiNeural';
       case 'ko':
         return 'ko-KR-SunHiNeural';
+      case 'tr':
+      case 'tr-tr':
+        return 'tr-TR-EmelNeural';
+      case 'fr':
+      case 'fr-fr':
+        return 'fr-FR-DeniseNeural';
+      case 'de':
+      case 'de-de':
+        return 'de-DE-KatjaNeural';
+      case 'es':
+      case 'es-es':
+        return 'es-ES-ElviraNeural';
+      case 'ru':
+      case 'ru-ru':
+        return 'ru-RU-SvetlanaNeural';
+      case 'it':
+      case 'it-it':
+        return 'it-IT-ElsaNeural';
+      case 'pt':
+      case 'pt-br':
+      case 'pt-pt':
+        return 'pt-BR-FranciscaNeural';
       default:
         return 'zh-CN-XiaoxiaoNeural';
     }

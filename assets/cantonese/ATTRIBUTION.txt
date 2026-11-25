@@ -1,0 +1,27 @@
+粤语离线字音及词组数据 / Offline Jyutping data
+
+Rime Cantonese / 粤拼词库 — CanCLID (粤语计算语言学基础设施小组) and contributors.
+https://github.com/rime/rime-cantonese
+Upstream: https://github.com/CanCLID/rime-cantonese-upstream
+Revision: 259f0e48bba840c3a2e0d117539e96937f3d89bc
+Files: jyut6ping3.chars.dict.yaml, jyut6ping3.words.dict.yaml
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+See LICENSE-RIME.txt. No endorsement by the original authors is implied.
+
+Simplified character aliases derived from OpenCC TSCharacters.txt.
+OpenCC — BYVoid and contributors.
+https://github.com/BYVoid/OpenCC
+Revision: fae2a0a911c30764e669a7d8b0591cd8e852934a
+License: Apache License 2.0; see LICENSE-OPENCC.txt.
+
+Modifications by PiliPala: converted TSV to JSON, deduplicated readings,
+ranked by upstream weight (unweighted rows use 100; ties keep source order),
+generated simplified spelling aliases without replacing original spellings.
+Variants retained; subtitle alignment only uses Han-only entries with matching
+character/syllable counts. This is pronunciation data, not a definitions dictionary.
+Not included: maps dictionary (separately licensed), letter/symbol dictionaries.
+Coverage is not a guarantee that every context-dependent reading is correct.
+Runtime colloquial defaults: 嚟 lei4, 㗎 gaa3, 噶 gaa1; upstream variants retained.
+
+Counts: {"originalEntries": 128818, "simplifiedAliases": 68783, "characters": 29640, "phrases": 167961, "readings": 208423, "skippedRows": 0}

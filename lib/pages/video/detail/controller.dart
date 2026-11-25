@@ -44,6 +44,13 @@ class VideoDetailController extends GetxController
   // 页面来源 稍后再看 收藏夹
   RxString sourceType = 'normal'.obs;
 
+  /// 离线缓存本地播放：从下载记录传入的本地文件路径。
+  /// 非空时跳过网络取流，直接用 media_kit 打开本地文件。
+  String? localVideoPath;
+  String? localAudioPath;
+  bool get isLocalPlayback =>
+      localVideoPath != null && localVideoPath!.isNotEmpty;
+
   /// tabs相关配置
   late TabController tabCtr;
   RxList<String> tabs = <String>['简介', '评论'].obs;
@@ -94,6 +101,8 @@ class VideoDetailController extends GetxController
   late bool isFirstTime = true;
   Floating? floating;
   late PreferredSizeWidget headerControl;
+  bool _restoreSwipeFullScreen = false;
+  bool _restoreSwipeVertical = false;
 
   late bool enableCDN;
   late int? cacheVideoQa;
@@ -107,6 +116,7 @@ class VideoDetailController extends GetxController
     BottomControlType.time,
     BottomControlType.space,
     BottomControlType.fit,
+    BottomControlType.verticalFullscreen,
     BottomControlType.fullscreen,
   ].obs;
   RxDouble sheetHeight = 0.0.obs;
@@ -120,6 +130,11 @@ class VideoDetailController extends GetxController
   void onInit() {
     super.onInit();
     final Map argMap = Get.arguments;
+    localVideoPath = argMap['localVideoPath']?.toString();
+    localAudioPath = argMap['localAudioPath']?.toString();
+    _restoreSwipeFullScreen = argMap['swipeFullScreen'] == true;
+    _restoreSwipeVertical = argMap['swipeVerticalFullScreen'] == true;
+    debugPrint('[local-play] onInit bvid=$bvid cid=${cid.value} localVideo=$localVideoPath localAudio=$localAudioPath');
     userInfo = userInfoCache.get('userInfoCache');
     if (argMap.containsKey('videoItem')) {
       var args = argMap['videoItem'];
@@ -292,11 +307,74 @@ class VideoDetailController extends GetxController
 
     /// 开启自动全屏时，在player初始化完成后立即传入headerControl
     plPlayerController.headerControl = headerControl;
+    await _restoreFullScreenAfterSwipe();
 
+  }
+
+  /// 离线缓存本地播放：不请求网络 playurl，直接用已下载文件初始化播放器。
+  Future<void> playerInitLocal({
+    String? title,
+    String? pic,
+    Duration? duration,
+  }) async {
+    // 本地路径无需网络等待，不能在详情页首帧 build 期间同步修改播放器
+    // 的 Rx 状态，否则会触发 setState during build 并中断 setDataSource。
+    await WidgetsBinding.instance.endOfFrame;
+
+    // 构造最小数据，避免详情页其它部件访问 late 的 data/firstVideo 时报错。
+    data = PlayUrlModel(
+      timeLength: duration?.inMilliseconds ?? 0,
+      quality: 0,
+    );
+    firstVideo = VideoItem();
+    final String? localVideo = localVideoPath;
+    final String? localAudio = localAudioPath;
+    debugPrint('[local-play] playerInitLocal bvid=$bvid cid=${cid.value} video=$localVideo audio=$localAudio title=$title');
+    videoUrl = localVideo ?? '';
+    audioUrl = localAudio ?? '';
+    defaultST = Duration.zero;
+    if (title != null && title.isNotEmpty && cover.isEmpty) updateCover(title);
+    if (pic != null && pic.isNotEmpty) updateCover(pic);
+
+    await plPlayerController.setDataSource(
+      DataSource(
+        file: (localVideo != null && localVideo.isNotEmpty)
+            ? File(localVideo)
+            : null,
+        videoSource: localVideo,
+        audioSource: (localAudio != null && localAudio.isNotEmpty)
+            ? localAudio
+            : null,
+        type: DataSourceType.file,
+      ),
+      enableHA: enableHA.value,
+      seekTo: Duration.zero,
+      duration: duration ?? Duration.zero,
+      bvid: bvid,
+      cid: cid.value,
+      enableHeart: false, // 离线播放不写观看历史
+      isFirstTime: isFirstTime,
+      autoplay: autoPlay.value,
+    );
+    plPlayerController.headerControl = headerControl;
+    isShowCover.value = false;
+    await _restoreFullScreenAfterSwipe();
+  }
+
+  Future<void> _restoreFullScreenAfterSwipe() async {
+    if (!_restoreSwipeFullScreen) return;
+    final bool vertical = _restoreSwipeVertical;
+    _restoreSwipeFullScreen = false;
+    _restoreSwipeVertical = false;
+    await plPlayerController.triggerFullScreen(
+      status: true,
+      forceMode: vertical ? FullScreenMode.vertical : FullScreenMode.horizontal,
+    );
   }
 
   // 视频链接
   Future queryVideoUrl() async {
+    debugPrint('[local-play] queryVideoUrl NETWORK bvid=$bvid cid=${cid.value}');
     var result =
         await VideoHttp.videoUrl(cid: cid.value, bvid: bvid, qn: cacheVideoQa);
     if (result['status']) {

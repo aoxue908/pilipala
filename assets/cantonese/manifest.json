@@ -1,0 +1,33 @@
+{
+  "sources": {
+    "chars": {
+      "url": "https://raw.githubusercontent.com/rime/rime-cantonese/259f0e48bba840c3a2e0d117539e96937f3d89bc/jyut6ping3.chars.dict.yaml",
+      "sha256": "9b053a594c80eae76545bcdd83239884a49b1ba48b89ca0ab9e8daac79f33013"
+    },
+    "words": {
+      "url": "https://raw.githubusercontent.com/rime/rime-cantonese/259f0e48bba840c3a2e0d117539e96937f3d89bc/jyut6ping3.words.dict.yaml",
+      "sha256": "54d174ad2bb997e4a678b7b076b84e4dc5914481b32467cdea3b43e88b7d5474"
+    },
+    "LICENSE-RIME.txt": {
+      "url": "https://raw.githubusercontent.com/rime/rime-cantonese/259f0e48bba840c3a2e0d117539e96937f3d89bc/LICENSE-CC-BY",
+      "sha256": "97d24386ff776d7160b87031b259a942bd03c9939796cab6724ad5d17d2cf785"
+    },
+    "simplified": {
+      "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/fae2a0a911c30764e669a7d8b0591cd8e852934a/data/dictionary/TSCharacters.txt",
+      "sha256": "9ff46a7d30e5765375eb13d33f2b03a34d298913caf2b120380679f33ae1642d"
+    },
+    "LICENSE-OPENCC.txt": {
+      "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/fae2a0a911c30764e669a7d8b0591cd8e852934a/LICENSE",
+      "sha256": "b534e465949558eec2597b04f5092b5e161236a68dfbfd04d547592ac3964308"
+    }
+  },
+  "stats": {
+    "originalEntries": 128818,
+    "simplifiedAliases": 68783,
+    "characters": 29640,
+    "phrases": 167961,
+    "readings": 208423,
+    "skippedRows": 0
+  },
+  "skipped": []
+}

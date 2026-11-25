@@ -9,6 +9,7 @@ class GStrorage {
   static late final Box<dynamic> localCache;
   static late final Box<dynamic> setting;
   static late final Box<dynamic> video;
+  static late final Box<dynamic> downloads;
 
   static Future<void> init() async {
     final Directory dir = await getApplicationSupportDirectory();
@@ -40,6 +41,13 @@ class GStrorage {
     );
     // 视频设置
     video = await Hive.openBox('video');
+    // 视频下载记录（离线缓存）
+    downloads = await Hive.openBox(
+      'downloads',
+      compactionStrategy: (int entries, int deletedEntries) {
+        return deletedEntries > 4;
+      },
+    );
   }
 
   static void regAdapter() {
@@ -60,6 +68,8 @@ class GStrorage {
     setting.close();
     video.compact();
     video.close();
+    downloads.compact();
+    downloads.close();
   }
 }
 
@@ -172,6 +182,9 @@ class LocalCacheKey {
 
 class VideoBoxKey {
   static const String captionAppearance = 'captionAppearance';
+  // 字幕设置 - 当前离线翻译包
+  static const String captionOfflineTranslationPackage =
+      'captionOfflineTranslationPackage';
 
   // 视频比例
   static const String videoFit = 'videoFit',

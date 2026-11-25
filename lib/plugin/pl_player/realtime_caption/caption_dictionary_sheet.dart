@@ -3,7 +3,11 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:pilipala/plugin/pl_player/controller.dart';
 import 'caption_dictionary.dart';
+import 'caption_context.dart';
 import 'caption_offline_dictionary.dart';
+import 'cantonese_lexicon.dart';
+import 'japanese_reading.dart';
+import 'caption_ruby.dart';
 import 'caption_pronunciation.dart';
 import 'caption_tts_dialog.dart';
 import 'caption_tts_service.dart';
@@ -13,6 +17,8 @@ Future<void> showCaptionDictionarySheet({
   required BuildContext context,
   required String word,
   String? contextSentence,
+  int? contextWordOffset,
+  List<CaptionContextRange> contextRanges = const [],
   String? contextTranslation,
   String? sourceLanguage,
   PlPlayerController? playerController,
@@ -32,6 +38,8 @@ Future<void> showCaptionDictionarySheet({
       return CaptionDictionarySheet(
         initialWord: word,
         contextSentence: contextSentence,
+        contextWordOffset: contextWordOffset,
+        contextRanges: contextRanges,
         contextTranslation: contextTranslation,
         sourceLanguage: sourceLanguage,
         playerController: playerController,
@@ -44,6 +52,8 @@ class CaptionDictionarySheet extends StatefulWidget {
   const CaptionDictionarySheet({
     required this.initialWord,
     this.contextSentence,
+    this.contextWordOffset,
+    this.contextRanges = const [],
     this.contextTranslation,
     this.sourceLanguage,
     this.playerController,
@@ -52,9 +62,34 @@ class CaptionDictionarySheet extends StatefulWidget {
 
   final String initialWord;
   final String? contextSentence;
+  final int? contextWordOffset;
+  final List<CaptionContextRange> contextRanges;
   final String? contextTranslation;
   final String? sourceLanguage;
   final PlPlayerController? playerController;
+
+  static String getLanguageDisplayName(String langCode) {
+    final l = langCode.trim().toLowerCase();
+    if (l == 'zh-cn' || l == 'zh' || l == 'zh-hans') return '中文';
+    if (l == 'yue' || l == 'zh-hk' || l == 'zh-tw' || l == 'zh-hant') return '粤语 YUE';
+    if (l.startsWith('en')) return '英语 EN';
+    if (l == 'ja') return '日语 JA';
+    if (l == 'ko') return '韩语 KO';
+    if (l == 'tr') return '土耳其语 TR';
+    if (l == 'fr') return '法语 FR';
+    if (l == 'de') return '德语 DE';
+    if (l == 'es') return '西班牙语 ES';
+    if (l == 'ru') return '俄语 RU';
+    if (l == 'it') return '意大利语 IT';
+    if (l == 'pt') return '葡萄牙语 PT';
+    if (l == 'vi') return '越南语 VI';
+    if (l == 'th') return '泰语 TH';
+    if (l == 'ar') return '阿拉伯语 AR';
+    if (l == 'id') return '印尼语 ID';
+    if (l == 'hi') return '印地语 HI';
+    if (l.isEmpty || l == 'auto') return '';
+    return langCode.toUpperCase();
+  }
 
   @override
   State<CaptionDictionarySheet> createState() => _CaptionDictionarySheetState();
@@ -67,15 +102,46 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
   List<String> _sentenceTokens = [];
   String? _playingAudioUrl;
   String? _forcedLanguage;
+  bool _showPronunciation = false;
+  late final String _contextSentence;
+  late final String? _contextTranslation;
 
   @override
   void initState() {
     super.initState();
     _currentWord = widget.initialWord.trim();
+    _contextSentence = captionContainingSentence(
+      text: widget.contextSentence ?? '',
+      word: _currentWord,
+      wordOffset: widget.contextWordOffset,
+      sourceRanges: widget.contextRanges,
+    );
+    // 截取原句后不能继续展示整个段落的翻译，避免错配并再次撑长面板。
+    _contextTranslation = _contextSentence == widget.contextSentence?.trim()
+        ? widget.contextTranslation : null;
     _textController = TextEditingController(text: _currentWord);
-    _forcedLanguage = widget.sourceLanguage;
+    _showPronunciation = widget.playerController?.realtimeCaptions.sheetShowPronunciation.value ??
+        widget.playerController?.realtimeCaptions.preferences?.sheetShowPronunciation.value ??
+        true;
+    final initialHasChinese = RegExp(r'\p{Script=Han}', unicode: true).hasMatch(_currentWord);
+    _forcedLanguage = (widget.sourceLanguage != null &&
+            (!widget.sourceLanguage!.startsWith('zh') || initialHasChinese))
+        ? widget.sourceLanguage
+        : null;
     _parseSentenceTokens();
     _startLookup(_currentWord, forcedLang: _forcedLanguage);
+  }
+
+  void _togglePronunciation() {
+    final next = !_showPronunciation;
+    setState(() {
+      _showPronunciation = next;
+    });
+    if (widget.playerController != null) {
+      widget.playerController!.realtimeCaptions.setSheetPronunciation(next);
+    } else {
+      widget.playerController?.realtimeCaptions.preferences?.setSheetPronunciation(next);
+    }
   }
 
   @override
@@ -86,8 +152,8 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
   }
 
   void _parseSentenceTokens() {
-    final s = widget.contextSentence;
-    if (s == null || s.trim().isEmpty) {
+    final s = _contextSentence;
+    if (s.trim().isEmpty) {
       _sentenceTokens = [];
       return;
     }
@@ -101,13 +167,27 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
     if (forcedLang != null) {
       _forcedLanguage = forcedLang;
     }
+    if ((_forcedLanguage ?? widget.sourceLanguage) == 'ja' ||
+        RegExp(r'[\u3040-\u30FF]').hasMatch(_contextSentence)) {
+      final sentence = _contextSentence.isNotEmpty ? _contextSentence : cleaned;
+      JapaneseReadingService.shared.analyze(sentence).then((tokens) {
+        if (!mounted) return;
+        setState(() {
+          if (tokens.isNotEmpty && sentence == _contextSentence) {
+            _sentenceTokens = tokens.where((token) =>
+                RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(token.text))
+                .map((token) => token.text).toList();
+          }
+        });
+      });
+    }
     setState(() {
       _currentWord = cleaned;
       _textController.text = cleaned;
       _lookupFuture = CaptionDictionary.shared.lookup(
         cleaned,
-        contextSentence: widget.contextSentence,
-        contextTranslation: widget.contextTranslation,
+        contextSentence: _contextSentence,
+        contextTranslation: _contextTranslation,
         isCantonese: _forcedLanguage == 'yue' ||
             widget.playerController?.realtimeCaptions.isCantoneseTrack == true,
         forcedLanguage: _forcedLanguage,
@@ -208,7 +288,7 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                   children: [
                     // 1. 原句上下文与切词导航
-                    if (widget.contextSentence != null && widget.contextSentence!.isNotEmpty)
+                    if (_contextSentence.isNotEmpty)
                       _buildContextSentenceCard(theme),
 
                     // 2. 搜索框
@@ -329,6 +409,50 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
                 ),
               ),
               const Spacer(),
+              // 顶部 “あ” 注音开关按钮 (与图1一致，指示并切换是否打开注音)
+              Tooltip(
+                message: _showPronunciation ? '点击关闭发音注音' : '点击开启发音注音',
+                child: InkWell(
+                  onTap: _togglePronunciation,
+                  borderRadius: BorderRadius.circular(16),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _showPronunciation
+                          ? const Color(0xff00897b).withOpacity(0.92)
+                          : Colors.white.withOpacity(0.08),
+                      border: Border.all(
+                        color: _showPronunciation
+                            ? Colors.tealAccent.withOpacity(0.7)
+                            : Colors.white.withOpacity(0.18),
+                        width: _showPronunciation ? 1.0 : 0.6,
+                      ),
+                      boxShadow: _showPronunciation
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xff00897b).withOpacity(0.5),
+                                blurRadius: 6,
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: Center(
+                      child: Text(
+                        'あ',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: _showPronunciation ? Colors.white : Colors.white38,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               InkWell(
                 onTap: () => Navigator.of(context).pop(),
                 borderRadius: BorderRadius.circular(16),
@@ -373,7 +497,7 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
               Icon(Icons.format_quote_rounded, size: 15, color: _kCyberCyan),
               SizedBox(width: 4),
               Text(
-                '字幕原句（点击单词切换查词）',
+                '所在句子（点击单词切换查词）',
                 style: TextStyle(
                   color: Color(0xFF38BDF8),
                   fontWeight: FontWeight.w600,
@@ -439,10 +563,10 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
             )
           else
             Text(
-              widget.contextSentence!,
+              _contextSentence,
               style: const TextStyle(fontSize: 14, color: _kCyberTextPrimary),
             ),
-          if (widget.contextTranslation != null && widget.contextTranslation!.isNotEmpty) ...[
+          if (_contextTranslation != null && _contextTranslation!.isNotEmpty) ...[
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.only(top: 6),
@@ -450,7 +574,7 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
                 border: Border(top: BorderSide(color: Colors.white.withOpacity(0.06))),
               ),
               child: Text(
-                widget.contextTranslation!,
+                _contextTranslation!,
                 style: const TextStyle(fontSize: 12, color: _kCyberTextSecondary),
               ),
             ),
@@ -536,7 +660,7 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
     );
   }
 
-  /// 单词标题与发音栏
+  /// 单词标题与发音栏 (支持 Ruby 头顶注音、末尾发音小喇叭、清爽布局)
   Widget _buildWordTitleAndPhonetic(WordLookupResult data, ThemeData theme) {
     return Container(
       padding: const EdgeInsets.all(14),
@@ -554,79 +678,154 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final maxPillWidth = constraints.maxWidth;
+          final effectivePhonetic = data.phonetic ??
+              CaptionPronunciation.shared.getOfflinePronunciation(
+                data.query,
+                chineseMode: (data.sourceLanguage == 'yue' || _forcedLanguage == 'yue')
+                    ? 'cantonese'
+                    : 'mandarin',
+                isCantoneseContext: (data.sourceLanguage == 'yue' || _forcedLanguage == 'yue'),
+                sourceLang: data.sourceLanguage,
+              );
+
+          final showRuby = _showPronunciation &&
+              ((data.sourceLanguage == 'ja' &&
+                  JapaneseReadingService.shared.cached(_contextSentence.isEmpty ? data.query : _contextSentence) != null) ||
+               (effectivePhonetic != null && effectivePhonetic.trim().isNotEmpty));
+
+          final audioUrl = (data.sourceLanguage == 'yue' &&
+                  data.audioUrl != null &&
+                  !data.audioUrl!.contains('google') &&
+                  !data.audioUrl!.contains('youdao'))
+              ? data.audioUrl!
+              : data.audioUrl;
+          final speakLang = (data.sourceLanguage == 'yue' || _forcedLanguage == 'yue')
+              ? 'zh-HK'
+              : (data.sourceLanguage.isNotEmpty && data.sourceLanguage != 'auto'
+                  ? data.sourceLanguage
+                  : 'zh-CN');
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 1. 原文区：开启注音时字头顶标注音；结尾紧跟发音小喇叭；右侧语言切换
               Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
-                    child: Text(
-                      data.query,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: _kCyberCyan,
-                        letterSpacing: 0.3,
-                      ),
-                      softWrap: true,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (data.sourceLanguage.isNotEmpty)
-                    InkWell(
-                      onTap: () {
-                        // 一键快速在 粤语 YUE 与 中文 之间切换
-                        final nextLang = (data.sourceLanguage == 'yue' || _forcedLanguage == 'yue') ? 'zh-CN' : 'yue';
-                        _startLookup(_currentWord, forcedLang: nextLang);
-                      },
-                      borderRadius: BorderRadius.circular(6),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
-                        decoration: BoxDecoration(
-                          color: _kCyberCyan.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: _kCyberCyan.withOpacity(0.4)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              (data.sourceLanguage == 'yue' || _forcedLanguage == 'yue')
-                                  ? '粤语 YUE'
-                                  : (data.sourceLanguage == 'zh-CN'
-                                      ? '中文'
-                                      : data.sourceLanguage.toUpperCase()),
-                              style: const TextStyle(
-                                fontSize: 10.5,
-                                color: _kCyberCyan,
-                                fontWeight: FontWeight.bold,
+                    child: showRuby
+                        ? Wrap(
+                            spacing: 0,
+                            runSpacing: 6,
+                            crossAxisAlignment: WrapCrossAlignment.end,
+                            children: [
+                              ..._pairRubyText(data.query, effectivePhonetic, data.sourceLanguage)
+                                  .map((item) {
+                                final isSpace = item.text.trim().isEmpty;
+                                if (isSpace) {
+                                  return const SizedBox(width: 5);
+                                }
+                                final isPunct = RegExp(r'^[.,!?:;，。！？；：、~…]+$').hasMatch(item.text);
+                                if (isPunct) {
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 1.0),
+                                    child: Text(
+                                      item.text,
+                                      style: const TextStyle(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                        color: _kCyberCyan,
+                                        height: 1.2,
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 1.0),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    children: [
+                                      if (item.ruby != null && item.ruby!.isNotEmpty)
+                                        Text(
+                                          item.ruby!,
+                                          style: const TextStyle(
+                                            fontSize: 10.5,
+                                            fontWeight: FontWeight.w500,
+                                            color: Color(0xFF38BDF8),
+                                            height: 1.1,
+                                          ),
+                                        )
+                                      else
+                                        const SizedBox(height: 11.5),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        item.text,
+                                        style: const TextStyle(
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.bold,
+                                          color: _kCyberCyan,
+                                          letterSpacing: 0.3,
+                                          height: 1.2,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }),
+                              // 发音小喇叭：直接紧跟在句子或单词末尾！
+                              _buildInlineSpeakerIcon(
+                                audioUrl: audioUrl,
+                                fallbackUrl: data.audioUrl,
+                                speakText: data.query,
+                                speakLang: speakLang,
                               ),
+                            ],
+                          )
+                        : Text.rich(
+                            TextSpan(
+                              children: [
+                                TextSpan(
+                                  text: data.query,
+                                  style: const TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                    color: _kCyberCyan,
+                                    letterSpacing: 0.3,
+                                    height: 1.25,
+                                  ),
+                                ),
+                                WidgetSpan(
+                                  alignment: PlaceholderAlignment.middle,
+                                  child: _buildInlineSpeakerIcon(
+                                    audioUrl: audioUrl,
+                                    fallbackUrl: data.audioUrl,
+                                    speakText: data.query,
+                                    speakLang: speakLang,
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: 3),
-                            const Icon(Icons.swap_horiz_rounded, size: 13, color: _kCyberCyan),
-                          ],
-                        ),
-                      ),
-                    ),
+                          ),
+                  ),
                 ],
               ),
-              const SizedBox(height: 10),
-              // 音标与发音按钮
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  // 英语发音：确保英式和美式两个发音均展示
-                  if (data.sourceLanguage == 'en' || RegExp(r'^[a-zA-Z]').hasMatch(data.query)) ...[
+
+              // 2. 音色设置与英文音标补充
+              if (data.sourceLanguage == 'en' || data.sourceLanguage.startsWith('en-')) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  children: [
+                    _buildLanguageTag(data),
                     _buildPhoneticPill(
                       label: '英',
                       phonetic: data.ukPhonetic ?? data.phonetic ?? '',
                       audioUrl: data.ukAudioUrl ??
                           'https://dict.youdao.com/dictvoice?audio=${Uri.encodeComponent(data.query)}&type=1',
                       fallbackUrl:
-                          'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-gb&q=${Uri.encodeComponent(data.query)}',
+                          'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=en-gb&q=${Uri.encodeComponent(data.query)}',
                       speakText: data.query,
                       speakLang: 'en-GB',
                       maxWidth: maxPillWidth,
@@ -637,130 +836,345 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
                       audioUrl: data.usAudioUrl ??
                           'https://dict.youdao.com/dictvoice?audio=${Uri.encodeComponent(data.query)}&type=2',
                       fallbackUrl:
-                          'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-us&q=${Uri.encodeComponent(data.query)}',
+                          'https://google.qianche.dpdns.org/translate_tts?ie=UTF-8&client=tw-ob&tl=en-us&q=${Uri.encodeComponent(data.query)}',
                       speakText: data.query,
                       speakLang: 'en-US',
                       maxWidth: maxPillWidth,
                     ),
-                  ] else if (data.sourceLanguage == 'yue' ||
-                      _forcedLanguage == 'yue' ||
-                      widget.playerController?.realtimeCaptions.isCantoneseTrack == true ||
-                      CaptionOfflineDictionary.isCantoneseWord(data.query) ||
-                      (widget.contextSentence != null &&
-                          CaptionPronunciation.isCantoneseText(widget.contextSentence!))) ...[
-                    // 粤语发音：展示粤拼与纯正粤语发音（Microsoft Edge-TTS / 小米 MiMo-V2.5-TTS）
-                    _buildPhoneticPill(
-                      label: '粤',
-                      phonetic: data.phonetic ?? '',
-                      audioUrl: (data.sourceLanguage == 'yue' &&
-                              data.audioUrl != null &&
-                              !data.audioUrl!.contains('google') &&
-                              !data.audioUrl!.contains('youdao'))
-                          ? data.audioUrl!
-                          : null,
-                      fallbackUrl: null,
-                      speakText: data.query,
-                      speakLang: 'zh-HK',
-                      maxWidth: maxPillWidth,
-                    ),
-                    // 粤语音色与引擎切换设置按钮
-                    InkWell(
-                      onTap: () async {
-                        await showTtsVoiceSettingsDialog(context, testWord: data.query);
-                        setState(() {});
-                      },
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        constraints: BoxConstraints(maxWidth: maxPillWidth),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: const Color(0x331E293B),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: _kCyberBorder),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.tune_rounded, size: 13, color: _kCyberCyan),
-                            const SizedBox(width: 5),
-                            Flexible(
-                              child: Text(
-                                CaptionTtsService.shared.config.engine == 'mimo'
-                                    ? 'MiMo: ${CaptionTtsService.shared.config.mimoVoice}'
-                                    : '发音人: ${CaptionTtsService.edgeCantoneseVoices[CaptionTtsService.shared.config.edgeCantoneseVoice]?.split(' ').first ?? '晓曼'}',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w500,
-                                  color: _kCyberTextSecondary,
-                                ),
-                                overflow: TextOverflow.ellipsis,
+                  ],
+                ),
+              ] else ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    // 语言切换标签（粤语 YUE ⇄ / 中文 ⇄）
+                    _buildLanguageTag(data),
+                    if (data.sourceLanguage == 'yue' ||
+                        data.sourceLanguage == 'zh-CN' ||
+                        data.sourceLanguage == 'zh' ||
+                        _forcedLanguage == 'yue' ||
+                        _forcedLanguage == 'zh-CN' ||
+                        RegExp(r'\p{Script=Han}', unicode: true).hasMatch(data.query) ||
+                        widget.playerController?.realtimeCaptions.isCantoneseTrack == true)
+                      Builder(
+                        builder: (context) {
+                          final isCantonese = data.sourceLanguage == 'yue' ||
+                              _forcedLanguage == 'yue' ||
+                              (data.sourceLanguage != 'zh-CN' &&
+                                  _forcedLanguage != 'zh-CN' &&
+                                  (widget.playerController?.realtimeCaptions.isCantoneseTrack == true ||
+                                      CaptionOfflineDictionary.isCantoneseWord(data.query) ||
+                                      CaptionPronunciation.isCantoneseText(_contextSentence)));
+                          final config = CaptionTtsService.shared.config;
+                          final voiceName = config.engine == 'mimo'
+                              ? 'MiMo: ${config.mimoVoice}'
+                              : (isCantonese
+                                  ? '发音人: ${CaptionTtsService.edgeCantoneseVoices[config.edgeCantoneseVoice]?.split(' ').first ?? '晓曼'}'
+                                  : '发音人: ${CaptionTtsService.edgeMandarinVoices[config.edgeMandarinVoice]?.split(' ').first ?? '晓晓'}');
+
+                          return InkWell(
+                            onTap: () async {
+                              await showTtsVoiceSettingsDialog(
+                                context,
+                                testWord: data.query,
+                                language: isCantonese ? 'zh-HK' : 'zh-CN',
+                              );
+                              setState(() {});
+                            },
+                            borderRadius: BorderRadius.circular(16),
+                            child: Container(
+                              constraints: BoxConstraints(maxWidth: maxPillWidth),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
+                              decoration: BoxDecoration(
+                                color: const Color(0x331E293B),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: _kCyberBorder),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.tune_rounded, size: 13, color: _kCyberCyan),
+                                  const SizedBox(width: 5),
+                                  Flexible(
+                                    child: Text(
+                                      voiceName,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w500,
+                                        color: _kCyberTextSecondary,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ] else if (data.sourceLanguage == 'ja' ||
-                      RegExp(r'[\u3040-\u309F\u30A0-\u30FF]').hasMatch(data.query)) ...[
-                    // 日语发音：展示假名/罗马音与纯正日语原生发音
-                    () {
-                      final jpMode = widget.playerController?.realtimeCaptions.japanesePhonetic.value ?? 'kana';
-                      var displayPhonetic = data.phonetic ?? '';
-                      if (jpMode == 'kana' && displayPhonetic.isNotEmpty) {
-                        displayPhonetic = CaptionPronunciation.romajiToHiragana(displayPhonetic);
-                      }
-                      final audio = 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=${Uri.encodeComponent(data.query)}';
-                      return _buildPhoneticPill(
-                        label: jpMode == 'kana' ? '假' : '日',
-                        phonetic: displayPhonetic,
-                        audioUrl: audio,
-                        fallbackUrl: audio,
-                        speakText: data.query,
-                        speakLang: 'ja',
-                        maxWidth: maxPillWidth,
-                      );
-                    }(),
-                  ] else if (data.sourceLanguage == 'ko' ||
-                      RegExp(r'[\uAC00-\uD7AF\u1100-\u11FF]').hasMatch(data.query)) ...[
-                    // 韩语发音：展示韩语罗马音与纯正韩语发音
-                    _buildPhoneticPill(
-                      label: '韩',
-                      phonetic: data.phonetic ?? '',
-                      audioUrl: 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(data.query)}',
-                      fallbackUrl: 'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ko&q=${Uri.encodeComponent(data.query)}',
-                      speakText: data.query,
-                      speakLang: 'ko',
-                      maxWidth: maxPillWidth,
-                    ),
-                  ] else ...[
-                    // 中文普通话或其他语言音标
-                    if (data.phonetic != null && data.phonetic!.isNotEmpty)
-                      _buildPhoneticPill(
-                        label: data.sourceLanguage == 'zh-CN' ? '拼' : data.sourceLanguage.toUpperCase(),
-                        phonetic: data.phonetic!,
-                        audioUrl: data.audioUrl ??
-                            'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${data.sourceLanguage}&q=${Uri.encodeComponent(data.query)}',
-                        fallbackUrl:
-                            'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${data.sourceLanguage}&q=${Uri.encodeComponent(data.query)}',
-                        speakText: data.query,
-                        speakLang: data.sourceLanguage,
-                        maxWidth: maxPillWidth,
-                      )
-                    else if (data.audioUrl != null && data.audioUrl!.isNotEmpty)
-                      _buildAudioButton(
-                        data.audioUrl!,
-                        '朗读发音',
-                        speakText: data.query,
-                        speakLang: data.sourceLanguage,
+                          );
+                        },
                       ),
                   ],
-                ],
-              ),
+                ),
+              ],
             ],
           );
         },
       ),
     );
+  }
+
+  /// 紧随在句子或单词末尾的发音小喇叭图标 (100%还原用户截图)
+  Widget _buildInlineSpeakerIcon({
+    required String? audioUrl,
+    String? fallbackUrl,
+    required String speakText,
+    required String speakLang,
+  }) {
+    final isPlaying = (_playingAudioUrl != null && _playingAudioUrl!.isNotEmpty) &&
+        ((audioUrl != null && audioUrl.isNotEmpty && _playingAudioUrl == audioUrl) ||
+            (_playingAudioUrl == speakText) ||
+            (_playingAudioUrl == _currentWord));
+
+    return Tooltip(
+      message: '朗读发音',
+      child: InkWell(
+        onTap: () => _playAudio(
+          audioUrl,
+          fallbackUrl: fallbackUrl,
+          speakText: speakText,
+          speakLang: speakLang,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          margin: const EdgeInsets.only(left: 6),
+          padding: const EdgeInsets.all(4.5),
+          decoration: BoxDecoration(
+            color: isPlaying
+                ? _kCyberCyan.withOpacity(0.25)
+                : Colors.white.withOpacity(0.06),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isPlaying ? _kCyberCyan : _kCyberCyan.withOpacity(0.35),
+              width: isPlaying ? 1.4 : 0.8,
+            ),
+            boxShadow: isPlaying
+                ? [
+                    BoxShadow(
+                      color: _kCyberCyan.withOpacity(0.4),
+                      blurRadius: 8,
+                    ),
+                  ]
+                : null,
+          ),
+          child: isPlaying
+              ? const _SoundWaveAnimation(color: _kCyberCyan, size: 16)
+              : const Icon(
+                  Icons.volume_up_rounded,
+                  size: 19,
+                  color: _kCyberCyan,
+                ),
+        ),
+      ),
+    );
+  }
+
+  /// 可手动切换的语言列表（检测出错时用户可自行纠正）。
+  /// value 为内部语言码，'auto' 表示"自动检测"（不强制）。
+  static const List<MapEntry<String, String>> _kLanguageChoices = [
+    MapEntry('auto', '自动检测'),
+    MapEntry('zh-CN', '中文'),
+    MapEntry('yue', '粤语'),
+    MapEntry('en', '英语'),
+    MapEntry('ja', '日语'),
+    MapEntry('ko', '韩语'),
+    MapEntry('fr', '法语'),
+    MapEntry('de', '德语'),
+    MapEntry('es', '西班牙语'),
+    MapEntry('ru', '俄语'),
+    MapEntry('tr', '土耳其语'),
+  ];
+
+  /// 语言切换胶囊按钮：点击弹出语言菜单，手动选择后重新查词。
+  /// 检测可能出错（如英文被误判为韩语），所以这里必须可点、可切换。
+  Widget _buildLanguageTag(WordLookupResult data) {
+    // 当前生效的语言码：优先用本次强制语言，其次用查词结果。
+    final activeCode = (_forcedLanguage != null && _forcedLanguage!.isNotEmpty)
+        ? _forcedLanguage
+        : (data.sourceLanguage.isEmpty || data.sourceLanguage == 'auto'
+            ? null
+            : data.sourceLanguage);
+    final label = activeCode == null
+        ? '自动检测'
+        : CaptionDictionarySheet.getLanguageDisplayName(activeCode);
+
+    return InkWell(
+      onTap: () => _showLanguageMenu(activeCode),
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+        decoration: BoxDecoration(
+          color: _kCyberCyan.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: _kCyberCyan.withOpacity(0.4)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 10.5,
+                color: _kCyberCyan,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(width: 3),
+            const Icon(Icons.arrow_drop_down_rounded,
+                size: 14, color: _kCyberCyan),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 弹出语言选择菜单，选中后用该语言重新查词（自动检测则清除强制语言）。
+  void _showLanguageMenu(String? activeCode) async {
+    final RenderBox? button = context.findRenderObject() as RenderBox?;
+    final relativeRect = button == null
+        ? RelativeRect.fill
+        : RelativeRect.fromRect(
+            button.localToGlobal(Offset.zero) & button.size,
+            Offset.zero & MediaQuery.of(context).size,
+          );
+
+    final selected = await showMenu<String>(
+      context: context,
+      position: relativeRect,
+      color: const Color(0xFF1E293B),
+      items: [
+        for (final choice in _kLanguageChoices)
+          PopupMenuItem<String>(
+            value: choice.key,
+            height: 40,
+            child: Row(
+              children: [
+                Icon(
+                  choice.key == (activeCode ?? 'auto')
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                  size: 16,
+                  color: _kCyberCyan,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  choice.value,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: choice.key == (activeCode ?? 'auto')
+                        ? _kCyberCyan
+                        : const Color(0xFFE2E8F0),
+                    fontWeight: choice.key == (activeCode ?? 'auto')
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+
+    // 返回 null = 点了菜单外取消，不处理。
+    if (selected == null || !mounted) return;
+    if (selected == 'auto') {
+      // 自动检测：清除强制语言，重新查词走 detectLanguage。
+      setState(() => _forcedLanguage = null);
+      _startLookup(_currentWord);
+    } else {
+      // 手动指定语言：强制重新查词。
+      _startLookup(_currentWord, forcedLang: selected);
+    }
+  }
+
+  /// 将原文与发音切分成对应字词（实现头顶注音 Ruby 对齐）
+  List<_SheetRubyItem> _pairRubyText(String text, String? phonetic, String lang) {
+    if (lang == 'ja' || RegExp(r'[\u3040-\u30FF]').hasMatch(text)) {
+      final context = _contextSentence.isEmpty ? text : _contextSentence;
+      final start = context.indexOf(text);
+      final analyzed = JapaneseReadingService.shared.cached(context);
+      if (analyzed == null || start < 0 || context.lastIndexOf(text) != start) {
+        return [_SheetRubyItem(text, null)];
+      }
+      final selected = analyzed.where((token) => token.start >= start &&
+          token.end <= start + text.length).map((token) =>
+          JapaneseReadingToken(token.text, token.reading, token.start - start)).toList();
+      if (selected.map((token) => token.text).join() != text) {
+        return [_SheetRubyItem(text, null)];
+      }
+      return buildCaptionRubyUnits(text, sourceLanguage: 'ja', japaneseTokens: selected)
+          .map((unit) => _SheetRubyItem(unit.text,
+              unit.pronunciation.isEmpty ? null : unit.pronunciation)).toList();
+    }
+    if (phonetic == null || phonetic.trim().isEmpty) {
+      return [_SheetRubyItem(text, null)];
+    }
+    final cleanText = text.trim();
+    final cleanPhonetic = phonetic.replaceAll('/', '').trim();
+    if (cleanText.isEmpty) return [];
+
+    // 2. 提取音节列表 (过滤标点符号，如逗号句号)
+    final syllables = cleanPhonetic
+        .split(RegExp(r'\s+'))
+        .map((s) => s.replaceAll(RegExp(r'^[.,!?:;，。！？；：、]+|[.,!?:;，。！？；：、]+$'), '').trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+
+    // 3. 将原文拆分为 Token：汉字单字、英文/数字单词、标点、空白
+    final tokenRegex = RegExp(
+      r"([\u4E00-\u9FFF\u3400-\u4DBF]|[a-zA-Z0-9'-]+|[\u3040-\u309F\u30A0-\u30FF]+|[\uAC00-\uD7AF]+|[^\s\w]|[\s]+)",
+      unicode: true,
+    );
+    final matches = tokenRegex.allMatches(cleanText);
+    final tokens = matches.map((m) => m.group(0)!).toList();
+
+    bool isPronounceable(String u) =>
+        RegExp(r'[\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF\uAC00-\uD7AFa-zA-Z0-9]').hasMatch(u);
+
+    final pronounceableUnits = tokens.where(isPronounceable).toList();
+
+    // 如果只有一个独立短单词（如单个英语单词），整词头顶标注
+    if (pronounceableUnits.length == 1 && cleanText.length <= 15 && !cleanText.contains(' ')) {
+      return [_SheetRubyItem(cleanText, cleanPhonetic)];
+    }
+
+    // 句子或多字模式：逐字/词一一对齐头顶注音
+    if (pronounceableUnits.isNotEmpty && syllables.isNotEmpty) {
+      final result = <_SheetRubyItem>[];
+      var sIdx = 0;
+      for (final t in tokens) {
+        if (isPronounceable(t)) {
+          if (sIdx < syllables.length) {
+            final syl = syllables[sIdx++];
+            // 若该 token 本身就是英文单词且与音节一致，不需要在头顶重复显示自身
+            if (t.toLowerCase() == syl.toLowerCase()) {
+              result.add(_SheetRubyItem(t, null));
+            } else {
+              result.add(_SheetRubyItem(t, syl));
+            }
+          } else {
+            result.add(_SheetRubyItem(t, null));
+          }
+        } else {
+          result.add(_SheetRubyItem(t, null));
+        }
+      }
+      return result;
+    }
+
+    // 兜底返回
+    return [_SheetRubyItem(cleanText, null)];
   }
 
   /// 发音小标签（赛博科技风胶囊与发音声波）
@@ -866,53 +1280,7 @@ class _CaptionDictionarySheetState extends State<CaptionDictionarySheet> {
     );
   }
 
-  Widget _buildAudioButton(
-    String audioUrl,
-    String label, {
-    String? fallbackUrl,
-    String? speakText,
-    String? speakLang,
-  }) {
-    final isPlaying = (_playingAudioUrl != null && _playingAudioUrl!.isNotEmpty) &&
-        (_playingAudioUrl == audioUrl || (speakText != null && _playingAudioUrl == speakText));
-    return InkWell(
-      onTap: () => _playAudio(
-        audioUrl,
-        fallbackUrl: fallbackUrl,
-        speakText: speakText,
-        speakLang: speakLang,
-      ),
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: isPlaying ? _kCyberCyan.withOpacity(0.18) : const Color(0x331E293B),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isPlaying ? _kCyberCyan : _kCyberBorder,
-            width: 1.0,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            isPlaying
-                ? const _SoundWaveAnimation(color: _kCyberCyan, size: 16)
-                : const Icon(Icons.volume_up_rounded, size: 16, color: _kCyberCyan),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: _kCyberCyan,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+
 
   /// 释义卡片
   Widget _buildDefinitionsCard(WordLookupResult data, ThemeData theme) {
@@ -1384,7 +1752,8 @@ class CaptionWordSegmenter {
     final result = <String>[];
     // 匹配连续汉字块、英文及数字块、日文假名块、韩文音节块
     final blockRegex = RegExp(
-      r"([a-zA-Z0-9'-]+|[\u3040-\u309f\u30a0-\u30ff]+|[\uac00-\ud7af]+|[\u4e00-\u9fa5]+)",
+      r"([a-zA-Z0-9'-]+|[\u3040-\u309f\u30a0-\u30ff]+|[\uac00-\ud7af]+|\p{Script=Han}+)",
+      unicode: true,
     );
     final blocks = blockRegex.allMatches(cleaned);
 
@@ -1393,7 +1762,7 @@ class CaptionWordSegmenter {
       if (block.isEmpty) continue;
 
       // 1. 非汉字块（英文、数字、日韩文等）保持原有词形
-      if (!RegExp(r'[\u4e00-\u9fa5]').hasMatch(block)) {
+      if (!RegExp(r'\p{Script=Han}', unicode: true).hasMatch(block)) {
         if (!result.contains(block)) {
           result.add(block);
         }
@@ -1403,7 +1772,13 @@ class CaptionWordSegmenter {
       // 2. 连续汉字块：正向最大匹配算法 (FMM)
       int i = 0;
       while (i < block.length) {
-        int matchLen = 1;
+        int matchLen = String.fromCharCode(block.substring(i).runes.first).length;
+        final phrase = CantoneseLexicon.shared.phraseAt(block, i);
+        if (phrase != null) {
+          if (!result.contains(phrase.text)) result.add(phrase.text);
+          i += phrase.text.length;
+          continue;
+        }
         // 优先从 4 字向 2 字贪婪匹配词库
         for (int len = math.min(4, block.length - i); len >= 2; len--) {
           final sub = block.substring(i, i + len);
@@ -1443,7 +1818,8 @@ class CaptionWordSegmenter {
     int cursor = 0;
 
     final wordRegex = RegExp(
-      r"[a-zA-Z0-9'-]+|[\u3040-\u309f\u30a0-\u30ff]+|[\uac00-\ud7af]+|[\u4e00-\u9fa5]+",
+      r"[a-zA-Z0-9'-]+|[\u3040-\u309f\u30a0-\u30ff]+|[\uac00-\ud7af]+|\p{Script=Han}+",
+      unicode: true,
     );
 
     for (final match in wordRegex.allMatches(text)) {
@@ -1460,13 +1836,19 @@ class CaptionWordSegmenter {
       final matchedText = match.group(0)!;
 
       // 2. 如果是非汉字块（英文、数字、假名、谚文），作为一个完整可点击单词
-      if (!RegExp(r'[\u4e00-\u9fa5]').hasMatch(matchedText)) {
+      if (!RegExp(r'\p{Script=Han}', unicode: true).hasMatch(matchedText)) {
         tokens.add(WordToken(text: matchedText, isWord: true));
       } else {
         // 3. 连续汉字块：应用 FMM 最大正向匹配算法切分成词组
         int i = 0;
         while (i < matchedText.length) {
-          int matchLen = 1;
+          int matchLen = String.fromCharCode(matchedText.substring(i).runes.first).length;
+          final phrase = CantoneseLexicon.shared.phraseAt(matchedText, i);
+          if (phrase != null) {
+            tokens.add(WordToken(text: phrase.text, isWord: true));
+            i += phrase.text.length;
+            continue;
+          }
           for (int len = math.min(4, matchedText.length - i); len >= 2; len--) {
             final sub = matchedText.substring(i, i + len);
             if (_customDict.contains(sub) ||
@@ -1516,4 +1898,11 @@ class WordToken {
     required this.isWord,
     this.isWhitespace = false,
   });
+}
+
+class _SheetRubyItem {
+  final String text;
+  final String? ruby;
+
+  const _SheetRubyItem(this.text, this.ruby);
 }

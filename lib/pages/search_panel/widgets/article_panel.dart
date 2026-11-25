@@ -18,7 +18,9 @@ class SearchArticlePanel extends StatelessWidget {
   final SearchPanelController ctr;
   final List? list;
 
-  final ArticlePanelController controller = Get.put(ArticlePanelController());
+  late final ArticlePanelController controller = Get.put(
+      ArticlePanelController(),
+      tag: 'search-filter-${identityHashCode(ctr)}');
 
   @override
   Widget build(BuildContext context) {

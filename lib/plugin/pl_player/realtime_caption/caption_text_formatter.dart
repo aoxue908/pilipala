@@ -305,4 +305,46 @@ class CaptionTextFormatter {
 
     return s.trim();
   }
+
+  /// 标点与文本恢复校验守卫算法 (借鉴自 D:\app\realtime-asr PunctuationText.restore)
+  /// 核心原则：标点增强模型或格式化算法无论怎么处理，都绝对不能篡改、删除或虚构原有的识别文字！
+  /// - 提取原文与结果中的所有核心词素字符 (忽略纯标点与多余空格)
+  /// - 若文字内容完全一致：应用规范化英文/中文标点排版
+  /// - 若文字内容发生增删或篡改 (words(orig) != words(result))：严格拒绝篡改，安全回退保留原文
+  static String restoreWithPunctuation(String original, String? result, {String language = 'auto'}) {
+    if (result == null || result.trim().isEmpty) return original;
+    final origWords = extractWordTokens(original);
+    final resultWords = extractWordTokens(result);
+    if (origWords != resultWords) {
+      // 词素不匹配，说明标点模型存在幻觉或丢字，安全保留原文
+      return original;
+    }
+
+    var value = result.trim();
+    if (language.startsWith('en')) {
+      value = value
+          .replaceAll('，', ', ')
+          .replaceAll('。', '. ')
+          .replaceAll('？', '? ')
+          .replaceAll('！', '! ')
+          .replaceAll('：', ': ')
+          .replaceAll('；', '; ');
+      value = value.replaceAllMapped(RegExp(r'([,!?;:])(?=[a-zA-Z0-9])'), (m) => '${m[1]} ');
+      value = value.replaceAll(RegExp(r' +'), ' ').trim();
+    }
+    return formatSpacingAndPunctuation(value);
+  }
+
+  /// 提取用于完整性校验的词元序列 (去除标点与格式符号，仅保留文字核心)
+  static String extractWordTokens(String text) {
+    final sb = StringBuffer();
+    for (final char in text.runes) {
+      final s = String.fromCharCode(char);
+      // 保留汉字、假名、韩文、英文字母与数字
+      if (RegExp(r'[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af0-9a-zA-Z]').hasMatch(s)) {
+        sb.write(s.toLowerCase());
+      }
+    }
+    return sb.toString();
+  }
 }

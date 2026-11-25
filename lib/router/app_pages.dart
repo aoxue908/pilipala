@@ -16,6 +16,7 @@ import 'package:pilipala/pages/setting/pages/logs.dart';
 
 import '../pages/about/index.dart';
 import '../pages/blacklist/index.dart';
+import '../pages/download/index.dart';
 import '../pages/dynamics/detail/index.dart';
 import '../pages/dynamics/index.dart';
 import '../pages/fan/index.dart';
@@ -80,6 +81,8 @@ class Routes {
     CustomGetPage(name: '/setting', page: () => const SettingPage()),
     //
     CustomGetPage(name: '/media', page: () => const MediaPage()),
+    // 离线缓存（视频下载记录）
+    CustomGetPage(name: '/download', page: () => const DownloadPage()),
     //
     CustomGetPage(name: '/fav', page: () => const FavPage()),
     //

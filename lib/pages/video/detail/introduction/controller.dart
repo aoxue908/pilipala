@@ -6,6 +6,7 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:pilipala/http/constants.dart';
+import 'package:pilipala/http/search.dart';
 import 'package:pilipala/http/user.dart';
 import 'package:pilipala/http/video.dart';
 import 'package:pilipala/models/user/fav_folder.dart';
@@ -17,6 +18,7 @@ import 'package:pilipala/plugin/pl_player/models/play_repeat.dart';
 import 'package:pilipala/utils/feed_back.dart';
 import 'package:pilipala/utils/id_utils.dart';
 import 'package:pilipala/utils/storage.dart';
+import 'package:pilipala/utils/utils.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../../../common/pages_bottom_sheet.dart';
@@ -43,6 +45,7 @@ class VideoIntroController extends GetxController {
   RxBool hasDisLike = false.obs;
   Box userInfoCache = GStrorage.userInfo;
   bool userLogin = false;
+  bool _isSwitchingVideo = false;
   Rx<FavFolderData> favFolderData = FavFolderData().obs;
   List addMediaIdsNew = [];
   List delMediaIdsNew = [];
@@ -476,11 +479,127 @@ class VideoIntroController extends GetxController {
     super.onClose();
   }
 
+  /// 竖屏手势切换上一条/下一条。
+  /// 有合集、分P或稍后再看列表时在原详情页内切换；普通单视频的下一条
+  /// 使用推荐列表，上一条则返回前一个视频详情页。
+  Future<void> playAdjacentVideo(bool next) async {
+    if (_isSwitchingVideo) return;
+    _isSwitchingVideo = true;
+    try {
+      debugPrint('[portrait-swipe] next=$next previousRoute=${Get.previousRoute}');
+      final VideoDetailController videoDetailCtr =
+          Get.find<VideoDetailController>(tag: heroTag);
+      final List episodes = [];
+      bool isPages = false;
+      if (videoDetailCtr.isWatchLaterVisible.value) {
+        episodes.addAll(videoDetailCtr.mediaList);
+      } else if (videoDetail.value.ugcSeason != null) {
+        final UgcSeason ugcSeason = videoDetail.value.ugcSeason!;
+        final List<SectionItem> sections = ugcSeason.sections ?? [];
+        for (final SectionItem section in sections) {
+          episodes.addAll(section.episodes ?? []);
+        }
+      } else if (videoDetail.value.pages != null &&
+          videoDetail.value.pages!.length > 1) {
+        isPages = true;
+        episodes.addAll(videoDetail.value.pages!);
+      }
+
+      if (episodes.isNotEmpty) {
+        final int currentCid = lastPlayCid.value != 0
+            ? lastPlayCid.value
+            : videoDetailCtr.cid.value;
+        int currentIndex = episodes
+            .indexWhere((e) => e.cid != null && e.cid == currentCid);
+        if (currentIndex == -1 && !isPages) {
+          currentIndex = episodes.indexWhere((e) {
+            final itemBvid =
+                e.bvid ?? (e.aid != null ? IdUtils.av2bv(e.aid!) : null);
+            return itemBvid == videoDetailCtr.bvid;
+          });
+        }
+        if (currentIndex == -1) {
+          currentIndex = next ? -1 : episodes.length;
+        }
+        int targetIndex = currentIndex + (next ? 1 : -1);
+        while (targetIndex >= 0 &&
+            targetIndex < episodes.length &&
+            episodes[targetIndex].cid == -1) {
+          targetIndex += next ? 1 : -1;
+        }
+        if (targetIndex < 0 || targetIndex >= episodes.length) {
+          SmartDialog.showToast(next ? '已经是最后一条了' : '已经是第一条了');
+          return;
+        }
+
+        final item = episodes[targetIndex];
+        final int cid = item.cid!;
+        final String cover = isPages
+            ? (videoDetail.value.pic ?? '')
+            : (item.cover ?? videoDetail.value.pic ?? '');
+        final String targetBvid = isPages
+            ? bvid
+            : (item.bvid != null && item.bvid!.isNotEmpty
+                ? item.bvid!
+                : (item.aid != null ? IdUtils.av2bv(item.aid!) : bvid));
+        final int targetAid = isPages
+            ? IdUtils.bv2av(bvid)
+            : (item.aid ?? IdUtils.bv2av(targetBvid));
+        await changeSeasonOrbangu(targetBvid, cid, targetAid, cover);
+        return;
+      }
+
+      if (videoDetailCtr.isLocalPlayback) {
+        SmartDialog.showToast('当前离线视频没有可切换的相邻记录');
+        return;
+      }
+
+      if (!next) {
+        if (Get.previousRoute.startsWith('/video')) {
+          Get.back();
+        } else {
+          SmartDialog.showToast('已经是第一条了');
+        }
+        return;
+      }
+
+      final ReleatedController relatedCtr =
+          Get.isRegistered<ReleatedController>(tag: heroTag)
+              ? Get.find<ReleatedController>(tag: heroTag)
+              : Get.put(ReleatedController(), tag: heroTag);
+      relatedCtr.bvid = videoDetailCtr.bvid;
+      if (relatedCtr.relatedVideoList.isEmpty) {
+        await relatedCtr.queryRelatedVideo();
+      }
+      if (relatedCtr.relatedVideoList.isEmpty) {
+        SmartDialog.showToast('暂时没有可切换的推荐视频');
+        return;
+      }
+      final item = relatedCtr.relatedVideoList.first;
+      final int cid = item.cid ??
+          await SearchHttp.ab2c(aid: item.aid, bvid: item.bvid);
+      Get.toNamed(
+        '/video?bvid=${item.bvid}&cid=$cid',
+        arguments: {
+          'videoItem': item,
+          'heroTag': Utils.makeHeroTag(item.aid),
+          'swipeFullScreen':
+              videoDetailCtr.plPlayerController.isFullScreen.value,
+          'swipeVerticalFullScreen':
+              videoDetailCtr.plPlayerController.isVerticalFullScreen.value,
+        },
+      );
+    } catch (err) {
+      SmartDialog.showToast('切换视频失败，请稍后重试');
+    } finally {
+      _isSwitchingVideo = false;
+    }
+  }
+
   /// 列表循环或者顺序播放时，自动播放下一个
   void nextPlay() {
     final List episodes = [];
     bool isPages = false;
-    late String cover;
     final VideoDetailController videoDetailCtr =
         Get.find<VideoDetailController>(tag: heroTag);
 
@@ -489,9 +608,9 @@ class VideoIntroController extends GetxController {
       episodes.addAll(videoDetailCtr.mediaList);
     } else if (videoDetail.value.ugcSeason != null) {
       final UgcSeason ugcSeason = videoDetail.value.ugcSeason!;
-      final List<SectionItem> sections = ugcSeason.sections!;
+      final List<SectionItem> sections = ugcSeason.sections ?? [];
       for (int i = 0; i < sections.length; i++) {
-        final List<EpisodeItem> episodesList = sections[i].episodes!;
+        final List<EpisodeItem> episodesList = sections[i].episodes ?? [];
         episodes.addAll(episodesList);
       }
     } else if (videoDetail.value.pages != null) {
@@ -500,30 +619,77 @@ class VideoIntroController extends GetxController {
       episodes.addAll(pages);
     }
 
-    final int currentIndex =
-        episodes.indexWhere((e) => e.cid == lastPlayCid.value);
-    int nextIndex = currentIndex + 1;
-    cover = episodes[nextIndex].cover;
-    final PlayRepeat platRepeat = videoDetailCtr.plPlayerController.playRepeat;
-
-    int cid = episodes[nextIndex].cid!;
-    while (cid == -1) {
-      nextIndex += 1;
-      SmartDialog.showToast('当前视频暂不支持播放，自动跳过');
-      cid = episodes[nextIndex].cid!;
+    if (episodes.isEmpty) {
+      return;
     }
 
-    // 列表循环
+    final int currentCid =
+        lastPlayCid.value != 0 ? lastPlayCid.value : videoDetailCtr.cid.value;
+    final String currentBvid = videoDetailCtr.bvid;
+    final int currentAid = videoDetailCtr.oid.value;
+
+    int currentIndex = episodes.indexWhere((e) => e.cid != null && e.cid != 0 && e.cid == currentCid);
+    if (currentIndex == -1 && !isPages) {
+      currentIndex = episodes.indexWhere((e) {
+        final itemBvid = e.bvid ?? (e.aid != null ? IdUtils.av2bv(e.aid!) : null);
+        return (itemBvid != null && itemBvid.isNotEmpty && itemBvid == currentBvid) ||
+            (e.aid != null && e.aid != 0 && e.aid == currentAid);
+      });
+    }
+
+    if (currentIndex == -1) {
+      currentIndex = 0;
+    }
+
+    int nextIndex = currentIndex + 1;
+    final PlayRepeat platRepeat = videoDetailCtr.plPlayerController.playRepeat;
+
+    // 列表循环或顺序播放边界处理
     if (nextIndex >= episodes.length) {
       if (platRepeat == PlayRepeat.listCycle) {
         nextIndex = 0;
-      }
-      if (platRepeat == PlayRepeat.listOrder) {
+      } else {
+        if (episodes.length > 1) {
+          SmartDialog.showToast('已播放到最后一集');
+        }
         return;
       }
     }
-    final String rBvid = isPages ? bvid : episodes[nextIndex].bvid;
-    final int rAid = isPages ? IdUtils.bv2av(bvid) : episodes[nextIndex].aid!;
+
+    // 检查是否有不可播放的视频并自动跳过
+    int skipCount = 0;
+    while (episodes[nextIndex].cid == -1 && skipCount < episodes.length) {
+      nextIndex += 1;
+      skipCount += 1;
+      if (nextIndex >= episodes.length) {
+        if (platRepeat == PlayRepeat.listCycle) {
+          nextIndex = 0;
+        } else {
+          SmartDialog.showToast('已播放到最后一集');
+          return;
+        }
+      }
+      SmartDialog.showToast('当前视频暂不支持播放，自动跳过');
+    }
+
+    if (episodes[nextIndex].cid == -1) {
+      return;
+    }
+
+    final nextItem = episodes[nextIndex];
+    final int cid = nextItem.cid!;
+    final String cover = isPages
+        ? (videoDetail.value.pic ?? '')
+        : (nextItem.cover ?? videoDetail.value.pic ?? '');
+    final String rBvid = isPages
+        ? bvid
+        : (nextItem.bvid != null && nextItem.bvid!.isNotEmpty
+            ? nextItem.bvid!
+            : (nextItem.aid != null ? IdUtils.av2bv(nextItem.aid!) : bvid));
+    final int rAid = isPages
+        ? IdUtils.bv2av(bvid)
+        : (nextItem.aid ?? IdUtils.bv2av(rBvid));
+
     changeSeasonOrbangu(rBvid, cid, rAid, cover);
   }
 

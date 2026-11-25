@@ -154,6 +154,11 @@ dependencies:
   re_highlight: ^0.0.3
   # 本地离线语音识别
   sherpa_onnx: ^1.13.4
+  # 下载后 DASH 音视频合并为 MP4（-c copy 无损封装）
+  # 用本地 vendored 的 6.0.2：hosted 版 buildscript 带 AGP 8.1/8.7，
+  # 与本项目 Gradle 7.5 + AGP 7.2.0 冲突（unknown property 'android'）。
+  ffmpeg_kit_flutter:
+    path: third_party/ffmpeg_kit_flutter
 
 dev_dependencies:
   flutter_test:
@@ -221,6 +226,8 @@ flutter:
     - assets/images/logo/
     - assets/images/live/
     - assets/images/video/
+    - assets/cantonese/
+    - assets/japanese/
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/assets-and-images/#resolution-aware
 

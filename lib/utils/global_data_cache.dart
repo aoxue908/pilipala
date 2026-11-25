@@ -62,8 +62,32 @@ class GlobalDataCache {
         defaultValue: FullScreenGestureMode.values.last.index) as int];
     enablePlayerControlAnimation = setting
         .get(SettingBoxKey.enablePlayerControlAnimation, defaultValue: true);
-    actionTypeSort = await setting.get(SettingBoxKey.actionTypeSort,
-        defaultValue: ['like', 'coin', 'collect', 'watchLater', 'share']);
+    actionTypeSort = List<String>.from(await setting.get(SettingBoxKey.actionTypeSort,
+        defaultValue: [
+          'like',
+          'coin',
+          'collect',
+          'watchLater',
+          'downloadVideo',
+          'share'
+        ]));
+    // 老用户升级：把「下载视频」插到分享前面，保留已有自定义顺序
+    if (!actionTypeSort.contains('downloadVideo')) {
+      final shareIndex = actionTypeSort.indexOf('share');
+      actionTypeSort.insert(
+        shareIndex >= 0 ? shareIndex : actionTypeSort.length,
+        'downloadVideo',
+      );
+    }
+    // 一次性迁移：旧默认顺序是「分享」在前、「下载」在后，按新需求二者对调位置。
+    {
+      final shareIndex = actionTypeSort.indexOf('share');
+      final downloadIndex = actionTypeSort.indexOf('downloadVideo');
+      if (shareIndex >= 0 && downloadIndex >= 0 && shareIndex < downloadIndex) {
+        actionTypeSort.removeAt(downloadIndex);
+        actionTypeSort.insert(shareIndex, 'downloadVideo');
+      }
+    }
 
     isOpenDanmu =
         await setting.get(SettingBoxKey.enableShowDanmaku, defaultValue: false);
@@ -81,10 +105,20 @@ class GlobalDataCache {
         await localCache.get(LocalCacheKey.strokeWidth, defaultValue: 1.5);
 
     var defaultPlayRepeat = await videoStorage.get(VideoBoxKey.playRepeat,
-        defaultValue: PlayRepeat.pause.value);
+        defaultValue: PlayRepeat.listOrder.value);
+    // 若此前保存的是旧版默认的 pause (1.0)，顺应用户对自动播放的期望迁移为 listOrder (2.0)
+    if (defaultPlayRepeat == PlayRepeat.pause.value) {
+      bool autoPlayEnable =
+          await setting.get(SettingBoxKey.autoPlayEnable, defaultValue: true);
+      if (autoPlayEnable) {
+        defaultPlayRepeat = PlayRepeat.listOrder.value;
+        await videoStorage.put(VideoBoxKey.playRepeat, defaultPlayRepeat);
+      }
+    }
     playRepeat = PlayRepeat.values
         .toList()
-        .firstWhere((e) => e.value == defaultPlayRepeat);
+        .firstWhere((e) => e.value == defaultPlayRepeat,
+            orElse: () => PlayRepeat.listOrder);
     playbackSpeed =
         await videoStorage.get(VideoBoxKey.playSpeedDefault, defaultValue: 1.0);
     enableAutoLongPressSpeed = await setting

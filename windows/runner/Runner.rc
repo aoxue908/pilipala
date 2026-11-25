@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "pilipala" "\0"
+            VALUE "CompanyName", "com.lynxi.player" "\0"
+            VALUE "FileDescription", "灵犀 · Lynxi" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "pilipala" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2023 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "pilipala.exe" "\0"
-            VALUE "ProductName", "pilipala" "\0"
+            VALUE "InternalName", "lynxi" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Lynxi. All rights reserved." "\0"
+            VALUE "OriginalFilename", "lynxi.exe" "\0"
+            VALUE "ProductName", "灵犀 · Lynxi" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

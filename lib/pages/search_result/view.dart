@@ -13,20 +13,27 @@ class SearchResultPage extends StatefulWidget {
 
 class _SearchResultPageState extends State<SearchResultPage>
     with TickerProviderStateMixin {
+  late final String _pageTag = 'search-${identityHashCode(this)}';
   late SearchResultController _searchResultController;
   late TabController? _tabController;
 
   @override
   void initState() {
     super.initState();
-    _searchResultController = Get.put(SearchResultController(),
-        tag: DateTime.now().millisecondsSinceEpoch.toString());
+    _searchResultController = Get.put(SearchResultController(), tag: _pageTag);
 
     _tabController = TabController(
       vsync: this,
       length: SearchType.values.length,
       initialIndex: _searchResultController.tabIndex,
     );
+  }
+
+  @override
+  void dispose() {
+    _tabController?.dispose();
+    Get.delete<SearchResultController>(tag: _pageTag);
+    super.dispose();
   }
 
   @override
@@ -89,8 +96,7 @@ class _SearchResultPageState extends State<SearchResultPage>
                   onTap: (index) {
                     if (index == _searchResultController.tabIndex) {
                       Get.find<SearchPanelController>(
-                              tag: SearchType.values[index].type +
-                                  _searchResultController.keyword!)
+                              tag: '$_pageTag:${SearchType.values[index].type}')
                           .animateToTop();
                     }
 
@@ -108,7 +114,7 @@ class _SearchResultPageState extends State<SearchResultPage>
                   SearchPanel(
                     keyword: _searchResultController.keyword,
                     searchType: i,
-                    tag: DateTime.now().millisecondsSinceEpoch.toString(),
+                    tag: '$_pageTag:${i.type}',
                   )
                 }
               ],

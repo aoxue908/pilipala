@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
@@ -26,10 +27,18 @@ import 'package:media_kit/media_kit.dart';
 import 'package:pilipala/utils/recommend_filter.dart';
 import 'package:catcher_2/catcher_2.dart';
 import './services/loggeer.dart';
+import 'plugin/pl_player/realtime_caption/cantonese_lexicon.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    for (final file in ['ATTRIBUTION', 'LICENSE', 'NOTICE', 'CONTRIBUTORS']) {
+      yield LicenseEntryWithLineBreaks(['Kuromoji IPADIC 0.9.0'],
+          await rootBundle.loadString('assets/japanese/$file.txt'));
+    }
+  });
+  await CantoneseLexicon.initialize();
   await SystemChrome.setPreferredOrientations(
       [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
   await GStrorage.init();
@@ -222,7 +231,7 @@ class BuildMainApp extends StatelessWidget {
     );
 
     return GetMaterialApp(
-      title: 'PiliPala',
+      title: '灵犀',
       theme: ThemeData(
         colorScheme: currentThemeValue == ThemeType.dark
             ? darkColorScheme

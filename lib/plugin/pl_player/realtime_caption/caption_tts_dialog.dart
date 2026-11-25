@@ -4,7 +4,11 @@ import 'caption_dictionary.dart';
 import 'caption_tts_service.dart';
 
 /// 弹出发音引擎与音色设置弹窗（支持 Edge-TTS、小米 MiMo-V2.5-TTS、系统原生）
-Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}) async {
+Future<void> showTtsVoiceSettingsDialog(
+  BuildContext context, {
+  String? testWord,
+  String? language,
+}) async {
   final service = CaptionTtsService.shared;
   var currentConfig = service.config;
 
@@ -60,6 +64,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                             currentConfig = CaptionTtsConfig(
                               engine: val,
                               edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                              edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                               mimoVoice: currentConfig.mimoVoice,
                               mimoApiKey: currentConfig.mimoApiKey,
                               mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -98,6 +103,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                             currentConfig = CaptionTtsConfig(
                               engine: val,
                               edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                              edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                               mimoVoice: currentConfig.mimoVoice,
                               mimoApiKey: currentConfig.mimoApiKey,
                               mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -120,6 +126,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                             currentConfig = CaptionTtsConfig(
                               engine: val,
                               edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                              edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                               mimoVoice: currentConfig.mimoVoice,
                               mimoApiKey: currentConfig.mimoApiKey,
                               mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -159,6 +166,45 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                                 currentConfig = CaptionTtsConfig(
                                   engine: currentConfig.engine,
                                   edgeCantoneseVoice: val,
+                                  edgeMandarinVoice: currentConfig.edgeMandarinVoice,
+                                  mimoVoice: currentConfig.mimoVoice,
+                                  mimoApiKey: currentConfig.mimoApiKey,
+                                  mimoBaseUrl: currentConfig.mimoBaseUrl,
+                                );
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        '普通话发音人 (Edge-TTS)',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: colorScheme.outline),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        decoration: BoxDecoration(
+                          color: colorScheme.surfaceVariant.withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: DropdownButton<String>(
+                          value: currentConfig.edgeMandarinVoice,
+                          isExpanded: true,
+                          underline: const SizedBox.shrink(),
+                          items: CaptionTtsService.edgeMandarinVoices.entries
+                              .map((e) => DropdownMenuItem(
+                                    value: e.key,
+                                    child: Text(e.value, style: const TextStyle(fontSize: 13)),
+                                  ))
+                              .toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setState(() {
+                                currentConfig = CaptionTtsConfig(
+                                  engine: currentConfig.engine,
+                                  edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                                  edgeMandarinVoice: val,
                                   mimoVoice: currentConfig.mimoVoice,
                                   mimoApiKey: currentConfig.mimoApiKey,
                                   mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -199,6 +245,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                                 currentConfig = CaptionTtsConfig(
                                   engine: currentConfig.engine,
                                   edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                                  edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                                   mimoVoice: val,
                                   mimoApiKey: currentConfig.mimoApiKey,
                                   mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -230,6 +277,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                             currentConfig = CaptionTtsConfig(
                               engine: currentConfig.engine,
                               edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                              edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                               mimoVoice: currentConfig.mimoVoice,
                               mimoApiKey: val.trim(),
                               mimoBaseUrl: currentConfig.mimoBaseUrl,
@@ -280,6 +328,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                           currentConfig = CaptionTtsConfig(
                             engine: currentConfig.engine,
                             edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                            edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                             mimoVoice: currentConfig.mimoVoice,
                             mimoApiKey: currentConfig.mimoApiKey,
                             mimoBaseUrl: val.trim().isNotEmpty ? val.trim() : CaptionTtsConfig.defaultMiMoBaseUrl,
@@ -295,12 +344,14 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                         OutlinedButton.icon(
                           onPressed: () async {
                             final sampleText = (testWord != null && testWord.isNotEmpty) ? testWord : '知不';
+                            final isMandarin = language == 'zh-CN' || language == 'zh';
                             SmartDialog.showLoading(msg: '正在试听发音…');
                             try {
                               // 更新临时配置以便试听
                               await service.updateConfig(
                                 engine: currentConfig.engine,
                                 edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                                edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                                 mimoVoice: currentConfig.mimoVoice,
                                 mimoApiKey: apiKeyController.text.trim(),
                                 mimoBaseUrl: baseUrlController.text.trim(),
@@ -308,7 +359,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                               await WordAudioPlayer.shared.play(
                                 '',
                                 speakText: sampleText,
-                                speakLang: 'zh-HK',
+                                speakLang: isMandarin ? 'zh-CN' : 'zh-HK',
                               );
                               SmartDialog.dismiss();
                             } catch (e) {
@@ -317,7 +368,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                             }
                           },
                           icon: const Icon(Icons.volume_up_rounded, size: 16),
-                          label: Text('试听「${(testWord != null && testWord.isNotEmpty) ? testWord : '知不'}」粤语发音'),
+                          label: Text('试听「${(testWord != null && testWord.isNotEmpty) ? (testWord.length > 6 ? "${testWord.substring(0, 6)}…" : testWord) : '发音'}」${(language == 'zh-CN' || language == 'zh') ? '普通话' : '粤语'}发音'),
                           style: OutlinedButton.styleFrom(
                             visualDensity: VisualDensity.compact,
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -339,6 +390,7 @@ Future<void> showTtsVoiceSettingsDialog(BuildContext context, {String? testWord}
                   await service.updateConfig(
                     engine: currentConfig.engine,
                     edgeCantoneseVoice: currentConfig.edgeCantoneseVoice,
+                    edgeMandarinVoice: currentConfig.edgeMandarinVoice,
                     mimoVoice: currentConfig.mimoVoice,
                     mimoApiKey: apiKeyController.text.trim(),
                     mimoBaseUrl: baseUrlController.text.trim(),

@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
+import 'caption_offline_phonetics.dart';
+import 'japanese_reading.dart';
 
 /// 字幕发音注音服务
 /// 支持：
@@ -13,32 +15,74 @@ class CaptionPronunciation {
   CaptionPronunciation._();
 
   final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 4),
-    receiveTimeout: const Duration(seconds: 4),
+    connectTimeout: const Duration(seconds: 3),
+    receiveTimeout: const Duration(seconds: 3),
     followRedirects: true,
+    headers: {
+      'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+    },
   ));
 
   final Map<String, String> _cache = {};
 
-  /// 获取发音注音
+  /// 本地极速离线获取发音注音（0ms 同步秒出，彻底消除网络请求时延与丢字）
+  String? getOfflinePronunciation(
+    String text, {
+    String japaneseMode = 'kana',
+    String chineseMode = 'auto',
+    bool isCantoneseContext = false,
+    String? sourceLang,
+  }) {
+    return CaptionOfflinePhonetics.shared.tryConvert(
+      text,
+      japaneseMode: japaneseMode,
+      chineseMode: chineseMode,
+      isCantoneseContext: isCantoneseContext,
+      sourceLang: sourceLang,
+    );
+  }
+
+  /// 获取发音注音（优先 0ms 纯本地秒出，未命中再走缓存或网络）
   Future<String?> getPronunciation(
     String text, {
     String japaneseMode = 'kana', // 'kana' 或 'romaji'
     String chineseMode = 'auto', // 'auto', 'cantonese', 'mandarin'
     bool isCantoneseContext = false,
+    String? sourceLang,
   }) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return null;
 
-    final cacheKey = '$chineseMode:$japaneseMode:$isCantoneseContext:$trimmed';
+    final effectiveLang = sourceLang ?? detectLanguage(trimmed);
+    if (effectiveLang == 'ja') {
+      await JapaneseReadingService.shared.analyze(trimmed);
+      return CaptionOfflinePhonetics.getJapanesePhonetic(trimmed, mode: japaneseMode);
+    }
+    final cacheKey = '$effectiveLang:$chineseMode:$japaneseMode:$isCantoneseContext:$trimmed';
     if (_cache.containsKey(cacheKey)) {
       return _cache[cacheKey];
     }
 
+    // 1. 优先 0ms 本地离线解析（中、日、韩、粤、英高频秒出）
+    final offline = getOfflinePronunciation(
+      trimmed,
+      japaneseMode: japaneseMode,
+      chineseMode: chineseMode,
+      isCantoneseContext: isCantoneseContext,
+      sourceLang: effectiveLang,
+    );
+    if (offline != null && offline.isNotEmpty) {
+      _cache[cacheKey] = offline;
+      return offline;
+    }
+
+    // 2. 离线未命中的生僻词或其它语种，才异步走网络兜底
     try {
-      var lang = detectLanguage(trimmed);
+      var lang = effectiveLang;
       if (lang == 'zh-CN' || lang == 'yue') {
-        if (chineseMode == 'cantonese' || isCantoneseContext) {
+        if (chineseMode == 'cantonese' || isCantoneseContext || effectiveLang == 'yue') {
           lang = 'yue';
         } else if (chineseMode == 'mandarin') {
           lang = 'zh-CN';
@@ -51,10 +95,20 @@ class CaptionPronunciation {
         result = await _getEnglishIpa(trimmed);
       } else {
         result = await _getGoogleRomanization(trimmed, lang: lang);
-        if (lang == 'ja' && japaneseMode == 'kana' && result != null) {
-          result = romajiToHiragana(result);
+        if (lang == 'ja') {
+          if (japaneseMode == 'kana' && result != null) {
+            result = romajiToHiragana(result);
+          }
+          // 无论是假名还是罗马音，日文发音绝对不能包含任何汉字！
+          if (result != null && RegExp(r'[\u4E00-\u9FFF]').hasMatch(result)) {
+            result = result.replaceAll(RegExp(r'[\u4E00-\u9FFF]'), '').trim();
+            if (result.isEmpty) result = null;
+          }
         } else if (lang == 'yue' && result != null) {
           result = formatJyutping(result);
+          if (RegExp(r'[\u4E00-\u9FFF]').hasMatch(result)) {
+            result = null;
+          }
         }
       }
 
@@ -77,7 +131,11 @@ class CaptionPronunciation {
   }
 
   /// 语言检测
-  static String detectLanguage(String text) {
+  static String detectLanguage(String text, {String? defaultOrContext}) {
+    // 优先采用已有语境语言（若已明确为日语、粤语、韩语等，绝不按汉字误判为中文普通话）
+    if (defaultOrContext != null && defaultOrContext != 'auto' && defaultOrContext.isNotEmpty) {
+      return defaultOrContext;
+    }
     // 包含韩文字符
     if (RegExp(r'[\uAC00-\uD7AF\u1100-\u11FF]').hasMatch(text)) {
       return 'ko';
@@ -94,7 +152,35 @@ class CaptionPronunciation {
     if (RegExp(r'[\u4E00-\u9FFF]').hasMatch(text)) {
       return 'zh-CN';
     }
-    // 纯英文字符
+    // 西里尔字母 (俄语、乌克兰语等)
+    if (RegExp(r'[\u0400-\u04FF]').hasMatch(text)) {
+      return 'ru';
+    }
+    // 阿拉伯字母
+    if (RegExp(r'[\u0600-\u06FF]').hasMatch(text)) {
+      return 'ar';
+    }
+    // 泰文字符
+    if (RegExp(r'[\u0E00-\u0E7F]').hasMatch(text)) {
+      return 'th';
+    }
+    // 土耳其语特有字母 (ğ, ş, ı, ö, ü, ç, Ğ, Ş, İ, Ö, Ü, Ç)
+    if (RegExp(r'[ğşıöüçĞŞİÖÜÇ]').hasMatch(text)) {
+      return 'tr';
+    }
+    // 法语特有字母 (à, â, æ, é, è, ê, ë, î, ï, ô, œ, ù, û, ÿ)
+    if (RegExp(r'[àâæéèêëîïôœùûÿÀÂÆÉÈÊËÎÏÔŒÙÛŸ]').hasMatch(text)) {
+      return 'fr';
+    }
+    // 德语特有字母 (ä, ö, ü, ß)
+    if (RegExp(r'[äöüßÄÖÜ]').hasMatch(text)) {
+      return 'de';
+    }
+    // 西班牙语特有字母 (á, é, í, ó, ú, ñ, ¿, ¡)
+    if (RegExp(r'[áíóúñ¿¡ÁÍÓÚÑ]').hasMatch(text)) {
+      return 'es';
+    }
+    // 纯拉丁英文字符
     if (RegExp(r'^[a-zA-Z0-9\s\p{P}]+$', unicode: true).hasMatch(text)) {
       return 'en';
     }
@@ -142,34 +228,49 @@ class CaptionPronunciation {
     return false;
   }
 
+  static const _googleEndpoints = [
+    'https://translate.googleapis.com/translate_a/single',
+    'https://translate.google.com/translate_a/single',
+    'https://google.qianche.dpdns.org/translate_a/single',
+  ];
+
   /// 通过 Google 转换服务获取罗马字/拼音注音
   Future<String?> _getGoogleRomanization(String text, {String lang = 'auto'}) async {
-    final response = await _dio.get<String>(
-      'https://translate.googleapis.com/translate_a/single',
-      queryParameters: {
-        'client': 'gtx',
-        'sl': lang, // 保持 yue，避免 zh-HK 导致返回普通话拼音
-        'tl': 'en',
-        'dt': ['t', 'rm'],
-        'q': text,
-      },
-      options: Options(responseType: ResponseType.plain),
-    );
+    for (final endpoint in _googleEndpoints) {
+      try {
+        final response = await _dio.get<String>(
+          endpoint,
+          queryParameters: {
+            'client': 'dict-chrome-ex',
+            'sl': lang, // 保持 yue，避免 zh-HK 导致返回普通话拼音
+            'tl': 'en',
+            'dt': ['t', 'rm'],
+            'q': text,
+          },
+          options: Options(
+            responseType: ResponseType.plain,
+            sendTimeout: const Duration(seconds: 3),
+            receiveTimeout: const Duration(seconds: 3),
+          ),
+        );
 
-    final dynamic data = jsonDecode(response.data ?? '');
-    if (data is! List || data.isEmpty) return null;
-    final dynamic sentences = data[0];
-    if (sentences is! List || sentences.isEmpty) return null;
+        final dynamic data = jsonDecode(response.data ?? '');
+        if (data is! List || data.isEmpty) continue;
+        final dynamic sentences = data[0];
+        if (sentences is! List || sentences.isEmpty) continue;
 
-    final dynamic lastElement = sentences.last;
-    if (lastElement is List) {
-      for (final item in lastElement.reversed) {
-        if (item is String && item.trim().isNotEmpty && item != text) {
-          return item.trim();
+        final dynamic lastElement = sentences.last;
+        if (lastElement is List) {
+          for (final item in lastElement.reversed) {
+            if (item is String && item.trim().isNotEmpty && item != text) {
+              return item.trim();
+            }
+          }
         }
+      } catch (_) {
+        // Try fallback endpoint
       }
     }
-
     return null;
   }
 

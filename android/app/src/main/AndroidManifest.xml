@@ -36,7 +36,7 @@
     </queries>
 
     <application
-        android:label="PiliPala"
+        android:label="灵犀"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         xmlns:tools="http://schemas.android.com/tools"

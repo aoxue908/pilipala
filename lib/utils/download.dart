@@ -56,12 +56,12 @@ class DownloadUtils {
           .get(imgUrl, options: Options(responseType: ResponseType.bytes));
       final String imgSuffix = imgUrl.split('.').last;
       String picName =
-          "plpl_${imgType}_${DateTime.now().toString().replaceAll(RegExp(r'[- :]'), '').split('.').first}";
+          "lynxi_${imgType}_${DateTime.now().toString().replaceAll(RegExp(r'[- :]'), '').split('.').first}";
       final SaveResult result = await SaverGallery.saveImage(
         Uint8List.fromList(response.data),
         name: '$picName.$imgSuffix',
-        // 保存到 PiliPala文件夹
-        androidRelativePath: "Pictures/PiliPala",
+        // 保存到 Lynxi 文件夹
+        androidRelativePath: "Pictures/Lynxi",
         androidExistNotSave: false,
       );
       SmartDialog.dismiss();

@@ -1,0 +1,14 @@
+Japanese morphological analysis: Kuromoji IPADIC 0.9.0
+https://github.com/atilika/kuromoji/tree/0.9.0
+Maven: com.atilika.kuromoji:kuromoji-ipadic:0.9.0
+Copyright 2010-2015 Atilika Inc. and contributors.
+Kuromoji is licensed under Apache License 2.0 (LICENSE.txt).
+Bundled MeCab-IPADIC 2.7.0-20070801 dictionary notices: NOTICE.txt.
+Contributor credits: CONTRIBUTORS.txt.
+
+PiliPala integration: tokenize full subtitle sentences in normal mode on an
+Android worker, retain UTF-16 source offsets, convert readings to hiragana,
+merge supported calendar/time expressions, and leave unknown readings blank.
+The engine and dictionaries are unmodified. No subtitle text is transmitted.
+Reading selection is statistical; ambiguous dates, names and new words are
+not guaranteed to be resolved without additional context.

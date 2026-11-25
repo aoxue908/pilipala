@@ -1,3 +1,4 @@
+import 'asr_repetition.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
@@ -23,6 +24,64 @@ class LocalAsrStream implements CaptionAsrStream {
   static const _bytesPerMillisecond = _sampleRate * 2 ~/ 1000;
   static const _frameBytes = _bytesPerMillisecond * 640;
 
+  /// 离线模型（SenseVoice/Whisper）送解码的 VAD 门槛。
+  /// 原为 1800ms + 400ms 静音，短句说完要再等近 2 秒才出字幕；
+  /// 降到 1000ms + 280ms：明显减少延迟，同时保留足够的声学上下文。
+  /// 未成句的音频由 _carryOverSamples 跨 chunk 合并，最终断句按标点，不会被切碎。
+  static const int vadMinDispatchMs = 1000;
+  static const int vadTrailingSilenceMs = 280;
+  /// 最长累积音频，超时强制送解码（防止长句一直不 dispatch）。
+  static const int vadMaxDispatchMs = 5000;
+
+  /// 流式 Zipformer 的端点静音阈值（秒）。原 0.8/0.4/6.0 偏高，
+  /// 说话停顿后要等较久才成句；适度降低以加快成句，不改动解码逻辑。
+  static const double endpointTrailingSilence1 = 0.5;
+  static const double endpointTrailingSilence2 = 0.3;
+  static const double endpointMinUtterance = 5.0;
+
+  /// 是否达到离线 chunk 的时长门槛（可测试）。
+  static bool offlineChunkReachedMin(int samples, {int sampleRate = _sampleRate}) =>
+      samples >= (vadMinDispatchMs * sampleRate) ~/ 1000;
+
+  /// 实际保留音频的起点也必须作为下一块的时间起点。
+  static int offlineCarryStart({
+    required int sampleCount,
+    required int splitSampleIndex,
+    required bool hasIncompleteSentence,
+  }) {
+    final split = splitSampleIndex.clamp(0, sampleCount);
+    if (!hasIncompleteSentence || split == sampleCount) return sampleCount;
+    return math.max(0, split - _sampleRate * 400 ~/ 1000);
+  }
+
+  /// Sherpa 只提供 token 起点，终点最多外推 350ms，且不跨下一 token/音频结尾。
+  static List<AsrWord> offlineWordTimings({
+    required List<String> tokens,
+    required List<double> timestamps,
+    required int chunkAudioStartMs,
+    required int totalDurationMs,
+  }) {
+    if (tokens.length != timestamps.length || tokens.isEmpty) return const [];
+    final words = <Map<String, dynamic>>[];
+    for (var i = 0; i < tokens.length; i++) {
+      final seconds = timestamps[i];
+      if (!seconds.isFinite || seconds < 0) return const [];
+      final start = (seconds * 1000).round();
+      var end = math.min(totalDurationMs, start + 350);
+      if (i + 1 < timestamps.length) {
+        final next = timestamps[i + 1];
+        if (!next.isFinite || next < seconds) return const [];
+        end = math.min(end, (next * 1000).round());
+      }
+      words.add({
+        'word': tokens[i],
+        'start_ms': chunkAudioStartMs + start,
+        'end_ms': chunkAudioStartMs + end,
+      });
+    }
+    return readAsrWords(words);
+  }
+
   sherpa.OnlineRecognizer? _onlineRecognizer;
   sherpa.OnlineStream? _onlineStream;
 
@@ -40,7 +99,6 @@ class LocalAsrStream implements CaptionAsrStream {
   final List<double> _pendingSamples = <double>[];
   final List<double> _carryOverSamples = <double>[];
   int _chunkStartSampleOffset = 0; // 当前 chunk 起始音频相对会话开头的采样偏移
-  bool _isFirstChunk = true;
   bool _isDecoding = false;
 
   bool _isOnlineDecoding = false;
@@ -55,6 +113,8 @@ class LocalAsrStream implements CaptionAsrStream {
   int _bytesSent = 0;
   int _utteranceIndex = 0;
   int? _processedMs;
+  String _lastEmittedText = '';
+  int _lastEmittedEndMs = 0;
 
   @override
   bool get done => _done;
@@ -71,6 +131,32 @@ class LocalAsrStream implements CaptionAsrStream {
   @override
   int get decodeChunkMs =>
       _isOfflineModel ? 8000 : math.max(1, _frameBytes ~/ _bytesPerMillisecond);
+
+  static String normalizeSenseVoiceLang(String? lang) {
+    if (lang == null || lang.isEmpty || lang == 'auto' || lang == 'multi') {
+      return 'auto';
+    }
+    final l = lang.trim().toLowerCase();
+    if (l.startsWith('zh-cn') || l.startsWith('zh-hans') || l == 'zh') return 'zh';
+    if (l.startsWith('yue') || l.startsWith('zh-hk')) return 'yue';
+    if (l.startsWith('en')) return 'en';
+    if (l.startsWith('ja')) return 'ja';
+    if (l.startsWith('ko')) return 'ko';
+    return 'auto';
+  }
+
+  static String normalizeWhisperLang(String? lang) {
+    if (lang == null || lang.isEmpty || lang == 'auto' || lang == 'multi') {
+      return '';
+    }
+    final l = lang.trim().toLowerCase();
+    if (l.startsWith('zh-cn') || l.startsWith('zh-hans') || l == 'zh') return 'zh';
+    if (l.startsWith('yue') || l.startsWith('zh-hk')) return 'yue';
+    if (l.startsWith('en')) return 'en';
+    if (l.startsWith('ja')) return 'ja';
+    if (l.startsWith('ko')) return 'ko';
+    return '';
+  }
 
   @override
   Future<void> connect(
@@ -150,7 +236,7 @@ class LocalAsrStream implements CaptionAsrStream {
             modelType: currentModel.id,
             modelDir: modelDir,
             preferNnapi: Platform.isAndroid,
-            language: language ?? 'auto',
+            language: normalizeSenseVoiceLang(language),
           ),
         );
 
@@ -198,9 +284,9 @@ class LocalAsrStream implements CaptionAsrStream {
             model: modelConfig,
             feat: featConfig,
             enableEndpoint: true,
-            rule1MinTrailingSilence: 0.8,
-            rule2MinTrailingSilence: 0.4,
-            rule3MinUtteranceLength: 6.0,
+            rule1MinTrailingSilence: endpointTrailingSilence1,
+            rule2MinTrailingSilence: endpointTrailingSilence2,
+            rule3MinUtteranceLength: endpointMinUtterance,
             decodingMethod: 'greedy_search',
           );
           return sherpa.OnlineRecognizer(config);
@@ -264,6 +350,13 @@ class LocalAsrStream implements CaptionAsrStream {
 
     try {
       if (_onlineStream != null) {
+        // 借鉴 D:\app\realtime-asr SherpaEngine 算法：
+        // 冲刷 Zipformer/Transducer 的未来声学上下文预测窗 (Look-Ahead Window, 约 500ms 静音)，
+        // 确保句末最后一个词/音节绝不被卡在预测窗中被截断丢弃！
+        _onlineStream!.acceptWaveform(
+          samples: Float32List(8000),
+          sampleRate: _sampleRate,
+        );
         _onlineStream!.inputFinished();
         await Future<void>.delayed(const Duration(milliseconds: 200));
         _decodeOnline(isFinal: true);
@@ -353,14 +446,14 @@ class LocalAsrStream implements CaptionAsrStream {
   void _checkAndDispatchOfflineChunk({required bool isFinal}) {
     if (_isDecoding || _closed || _workerSendPort == null) return;
 
-    final minSamplesForVad = (1.8 * _sampleRate).round(); // 1.8 秒起步检测自然停顿，避免积攒过久导致延迟刷出
-    final maxSamples = 6 * _sampleRate; // 最长 6 秒强制切分
+    const maxSamples = vadMaxDispatchMs * _sampleRate ~/ 1000;
 
     final shouldDispatch = isFinal
         ? (_pendingSamples.isNotEmpty || _carryOverSamples.isNotEmpty)
         : (_pendingSamples.length >= maxSamples ||
-            (_pendingSamples.length >= minSamplesForVad &&
-                _hasTrailingSilence(_pendingSamples, silenceMs: 400)));
+            (offlineChunkReachedMin(_pendingSamples.length) &&
+                _hasTrailingSilence(
+                    _pendingSamples, silenceMs: vadTrailingSilenceMs)));
 
     if (!shouldDispatch) return;
 
@@ -450,10 +543,15 @@ class LocalAsrStream implements CaptionAsrStream {
   }) {
     if (_closed || _done || allSamples.isEmpty) return;
 
-    final trimmed = text.trim();
+    final trimmed = suppressAsrShortLoops(text.trim());
+    final hadLoop = trimmed != text.trim();
+    if (hadLoop) {
+      // Do not feed a degenerate unfinished tail back into the next decode.
+      tokens = const [];
+      timestamps = const [];
+    }
     if (trimmed.isEmpty) {
       if (isFinal) {
-        _isFirstChunk = true;
         _chunkStartSampleOffset = 0;
       } else {
         // 该分段为静音/背景音，推进时间偏移，避免时间戳滞后
@@ -463,7 +561,7 @@ class LocalAsrStream implements CaptionAsrStream {
     }
 
     // 解析并切分整句与末尾未完结句
-    final split = _splitSentences(trimmed, isFinal: isFinal);
+    final split = _splitSentences(trimmed, isFinal: isFinal || hadLoop);
     List<String> completedSentences = split.completed;
     String incompleteSentence = split.incomplete;
 
@@ -483,7 +581,6 @@ class LocalAsrStream implements CaptionAsrStream {
           timestamps: timestamps,
         );
       }
-      _isFirstChunk = true;
       _chunkStartSampleOffset = 0;
       return;
     }
@@ -519,55 +616,37 @@ class LocalAsrStream implements CaptionAsrStream {
     required List<double> timestamps,
   }) {
     final sentenceTimings = <({String text, int startMs, int endMs})>[];
+    final sentenceWords = <int, List<AsrWordTiming>>{};
     int splitSampleIndex = allSamples.length;
 
-    final hasTimestamps = timestamps.isNotEmpty &&
-        tokens.isNotEmpty &&
-        timestamps.length == tokens.length;
-
-    if (hasTimestamps) {
-      // 优先：利用 Sherpa-ONNX 神经网络输出的词级声学对齐时间戳，精确定位每句话的起止时刻
-      int tokenIdx = 0;
+    final timedWords = alignAsrWords(
+      [...completedSentences, incompleteSentence].join('\n'),
+      offlineWordTimings(
+        tokens: tokens,
+        timestamps: timestamps,
+        chunkAudioStartMs: chunkAudioStartMs,
+        totalDurationMs: totalDurationMs,
+      ),
+    );
+    if (timedWords.isNotEmpty) {
+      // 按原文偏移匹配 token，标点不再误消耗下一句的第一个词。
+      var offset = 0;
       for (final sentence in completedSentences) {
-        final chars = sentence.replaceAll(RegExp(r'\s+'), '');
-        if (chars.isEmpty) continue;
-
-        // 寻找句首 token
-        while (tokenIdx < tokens.length) {
-          final t = tokens[tokenIdx].replaceAll(RegExp(r'[\s_ ]+'), '');
-          if (t.isNotEmpty && chars.contains(t)) break;
-          tokenIdx++;
-        }
-        final startToken = tokenIdx.clamp(0, tokens.length - 1);
-        final startSec = timestamps[startToken];
-
-        // 推进到句尾 token
-        int matched = 0;
-        while (tokenIdx < tokens.length && matched < chars.length) {
-          final t = tokens[tokenIdx].replaceAll(RegExp(r'[\s_ ]+'), '');
-          matched += t.length;
-          tokenIdx++;
-        }
-        final endToken = (tokenIdx - 1).clamp(startToken, tokens.length - 1);
-        final endSec = timestamps[endToken];
-
-        double sentenceEndSec = endSec + 0.35;
-        if (tokenIdx < timestamps.length) {
-          sentenceEndSec = math.min(sentenceEndSec, timestamps[tokenIdx]);
-        }
-        if (sentenceEndSec <= startSec) {
-          sentenceEndSec = startSec + 0.5;
-        }
-
-        final startMs = chunkAudioStartMs + (startSec * 1000).round();
-        final endMs = chunkAudioStartMs + (sentenceEndSec * 1000).round();
-        sentenceTimings.add((text: sentence, startMs: startMs, endMs: endMs));
+        final words = timedWords.where((word) =>
+            word.startOffset >= offset &&
+            word.startOffset < offset + sentence.length).toList();
+        offset += sentence.length + 1;
+        if (words.isEmpty) continue;
+        sentenceWords[sentenceTimings.length] = words;
+        sentenceTimings.add((text: sentence,
+            startMs: words.first.startMs, endMs: words.last.endMs));
       }
 
-      if (incompleteSentence.isNotEmpty && tokenIdx < timestamps.length) {
-        final incStartSec = timestamps[tokenIdx];
+      final incompleteWords = timedWords.where((word) => word.startOffset >= offset);
+      if (incompleteSentence.isNotEmpty && incompleteWords.isNotEmpty) {
+        final incStartMs = incompleteWords.first.startMs - chunkAudioStartMs;
         // 预留 100ms 安全前导余量，避免切碎首个字的发音
-        splitSampleIndex = (((incStartSec - 0.1) * _sampleRate).round())
+        splitSampleIndex = ((incStartMs - 100) * _sampleRate ~/ 1000)
             .clamp(0, allSamples.length);
       }
     } else {
@@ -612,8 +691,23 @@ class LocalAsrStream implements CaptionAsrStream {
       }
     }
 
-    // 发射所有完整句子
-    for (final st in sentenceTimings) {
+    // 发射所有完整句子（增加声学回退重叠完全重复抑制保护）
+    for (var index = 0; index < sentenceTimings.length; index++) {
+      final st = sentenceTimings[index];
+      final text = st.text.trim();
+      if (text.isEmpty) continue;
+
+      // 若与刚刚发射的文本完全一致，且时间重叠或紧随其后（<= 400ms），判定为声学回退重复。
+      // 但短句（<8字）是用户真的在重复（"对，对"、"一，二，一"），必须放行，否则漏词。
+      if (text == _lastEmittedText &&
+          text.length >= 8 &&
+          st.startMs <= _lastEmittedEndMs + 400) {
+        continue;
+      }
+
+      _lastEmittedText = text;
+      _lastEmittedEndMs = st.endMs;
+
       _utteranceIndex++;
       _onResult?.call({
         'utterance': _utteranceIndex,
@@ -621,20 +715,24 @@ class LocalAsrStream implements CaptionAsrStream {
         'start_ms': st.startMs,
         'audio_ms': st.endMs,
         'utterance_end': true,
+        'words': [
+          for (final word in sentenceWords[index] ?? const <AsrWordTiming>[])
+            word.toJson(),
+        ],
       });
     }
 
     // 将未完结句子的音频留存至下一次 chunk ("对应句子不完整的部分，可以保留接上后来识别的部分合并起来，不断循环")
     _carryOverSamples.clear();
-    if (incompleteSentence.isNotEmpty && splitSampleIndex < allSamples.length) {
-      // 预留 400ms 声学前导回退安全余量 (Lookback Safety Margin)
-      // 杜绝字符长度比例切分的不精准导致斩断词首音素，确保下一次识别能完整接收未完结词句的开头发音！
-      final lookbackSamples = (0.4 * _sampleRate).round();
-      final safeStartIndex = math.max(0, splitSampleIndex - lookbackSamples);
-      _carryOverSamples.addAll(allSamples.sublist(safeStartIndex));
+    final carryStart = offlineCarryStart(
+      sampleCount: allSamples.length,
+      splitSampleIndex: splitSampleIndex,
+      hasIncompleteSentence: incompleteSentence.isNotEmpty,
+    );
+    if (carryStart < allSamples.length) {
+      _carryOverSamples.addAll(allSamples.sublist(carryStart));
     }
-    _chunkStartSampleOffset += splitSampleIndex;
-    _isFirstChunk = false;
+    _chunkStartSampleOffset += carryStart;
   }
 
   List<({int start, int end})> _detectSpeechRanges(Float32List samples) {
@@ -803,6 +901,13 @@ class LocalAsrStream implements CaptionAsrStream {
     _onError = null;
     _onResult = null;
 
+    if (_finishCompleter != null && !_finishCompleter!.isCompleted) {
+      try {
+        _finishCompleter!.complete();
+      } catch (_) {}
+      _finishCompleter = null;
+    }
+
     try {
       _workerSendPort?.send('close');
     } catch (_) {}
@@ -826,7 +931,6 @@ class LocalAsrStream implements CaptionAsrStream {
 
     _carryOverSamples.clear();
     _pendingSamples.clear();
-    _isFirstChunk = true;
     _chunkStartSampleOffset = 0;
     _done = true;
   }
@@ -914,7 +1018,7 @@ void _offlineWorkerEntry(_OfflineWorkerInitParams params) {
       final tokensPath = '${params.modelDir}/tokens.txt';
       final senseVoiceConfig = sherpa.OfflineSenseVoiceModelConfig(
         model: modelPath,
-        language: params.language,
+        language: LocalAsrStream.normalizeSenseVoiceLang(params.language),
         useInverseTextNormalization: true,
       );
       final modelConfig = sherpa.OfflineModelConfig(
@@ -940,7 +1044,7 @@ void _offlineWorkerEntry(_OfflineWorkerInitParams params) {
       final whisperConfig = sherpa.OfflineWhisperModelConfig(
         encoder: encoderPath,
         decoder: decoderPath,
-        language: '',
+        language: LocalAsrStream.normalizeWhisperLang(params.language),
       );
       final modelConfig = sherpa.OfflineModelConfig(
         whisper: whisperConfig,

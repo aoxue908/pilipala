@@ -1,14 +1,20 @@
 @echo off
 chcp 65001 >nul
-title Pilipala Fast Debug APK Build Tool
+title Lynxi Fast Debug APK Build Tool
 cd /d "%~dp0"
 
 echo ========================================================
-echo   Pilipala Fast Debug APK Build Tool [极速调试导出]
+echo   Lynxi Fast Debug APK Build Tool [极速调试导出]
 echo ========================================================
 echo.
 
-set "JAVA_HOME=C:\Program Files\Android\Android Studio\jbr"
+if exist "D:\app\talktime\.tools\jdk-17.0.17+10\bin\java.exe" (
+    set "JAVA_HOME=D:\app\talktime\.tools\jdk-17.0.17+10"
+) else if exist "D:\app\talktime\.tools\zulu17.70.113-ca-jdk17.0.21.0.3-win_x64\bin\java.exe" (
+    set "JAVA_HOME=D:\app\talktime\.tools\zulu17.70.113-ca-jdk17.0.21.0.3-win_x64"
+) else (
+    set "JAVA_HOME=C:\Program Files\Android\Android Studio\jbr"
+)
 set "PATH=%JAVA_HOME%\bin;D:\FlutterSDK\flutter3.19.6\bin;%PATH%"
 
 set "CLEAN_BUILD=0"
@@ -22,6 +28,8 @@ if /i "%2"=="all" set "TARGET_PLATFORM="
 
 if "%CLEAN_BUILD%"=="1" (
     echo [*] 检测到 clean 参数，正在清理旧缓存...
+    taskkill /F /IM java.exe >nul 2>nul
+    taskkill /F /IM gradle.exe >nul 2>nul
     call flutter clean
     call flutter pub get
 ) else (
@@ -37,6 +45,22 @@ if defined TARGET_PLATFORM (
 ) else (
     echo [*] 正在构建全架构 Debug APK [universal]...
     call flutter build apk --debug
+)
+
+if errorlevel 1 (
+    echo.
+    echo [*] 增量构建异常，正在自动清理残留资源缓存并重新构建...
+    taskkill /F /IM java.exe >nul 2>nul
+    taskkill /F /IM gradle.exe >nul 2>nul
+    if exist "build\app\intermediates" (
+        rmdir /s /q "build\app\intermediates" >nul 2>nul
+    )
+    echo [*] 正在重试构建 Debug APK...
+    if defined TARGET_PLATFORM (
+        call flutter build apk --debug --target-platform %TARGET_PLATFORM%
+    ) else (
+        call flutter build apk --debug
+    )
 )
 
 if errorlevel 1 (

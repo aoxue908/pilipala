@@ -15,6 +15,7 @@ class PlayUrlModel {
     this.seekParam,
     this.seekType,
     this.dash,
+    this.durl,
     this.supportFormats,
     // this.highFormat,
     this.lastPlayTime,
